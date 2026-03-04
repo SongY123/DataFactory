@@ -1,0 +1,19 @@
+server:
+  host: 127.0.0.1
+  port: 8888
+
+database:
+  sql_dir: "src/web/resources/db/migrations"
+  db_path: "datafactory.db"
+
+auth:
+  # If true, guarded APIs can be accessed without login and will auto-use admin/admin.
+  auto_login_as_admin: false
+
+logging:
+  level: INFO
+  file_path: "logs/app.log"
+  max_file_size_mb: 10
+  backup_count: 5
+  format: "%(asctime)s - %(name)s - %(pathname)s:%(lineno)d - %(levelname)s - %(message)s"
+  console: true
