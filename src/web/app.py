@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from utils.config_loader import ConfigLoader, get_config
-from web.api import auth_router, user_router
+from web.api import auth_router, dataset_router, user_router
 from web.db_migration_runner import SqlMigrationRunner
 from web.entity.model import get_engine, init_engine
 
@@ -76,6 +76,7 @@ app.add_middleware(
 
 app.include_router(user_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
+app.include_router(dataset_router, prefix="/api")
 
 
 @app.get("/health")
@@ -109,3 +110,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
