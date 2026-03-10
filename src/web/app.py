@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from contextlib import asynccontextmanager
@@ -31,6 +31,7 @@ def _load_runtime_config(config_path: str | Path) -> None:
 _load_runtime_config(DEFAULT_WEB_CONFIG_PATH)
 
 from utils.logger import logger
+from web.api import agent_router, auth_router, dataset_router, user_router
 
 
 def _resolve_path(path_str: Optional[str]) -> Optional[Path]:
@@ -76,6 +77,8 @@ app.add_middleware(
 
 app.include_router(user_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
+app.include_router(dataset_router, prefix="/api")
+app.include_router(agent_router, prefix="/api")
 app.include_router(agentic_synthesis_router, prefix="/api")
 
 
