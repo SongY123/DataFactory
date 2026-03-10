@@ -8,3 +8,7 @@ venv/
 
 logs/
 *.db
+
+tmp/
+
+outputs/
