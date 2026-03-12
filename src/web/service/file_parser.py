@@ -50,7 +50,7 @@ class ParsedFileContent:
 
 
 class AgentFileParser:
-    _TEXT_EXTENSIONS = {".txt", ".md", ".csv"}
+    _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".jsonl"}
     _DOC_MIME_TYPES = {"application/msword"}
 
     def __init__(self) -> None:
@@ -139,7 +139,7 @@ class AgentFileParser:
             return "pdf"
         if ext == ".docx" or mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
             return "docx"
-        if ext == ".xlsx" or mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        if ext in {".xlsx", ".xlsm"} or mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
             return "xlsx"
         if ext in AgentFileParser._TEXT_EXTENSIONS:
             return "text"
@@ -411,6 +411,6 @@ class AgentFileParser:
             return self._parse_text(file_name=safe_name, mime_type=mime_type, raw=raw)
 
         logger.info("Unsupported upload type: file=%s mime=%s", safe_name, mime_type)
-        raise FileParseError("Unsupported file type. Supported: .txt/.md/.csv/.pdf/.docx/.xlsx")
+        raise FileParseError("Unsupported file type. Supported: .txt/.md/.csv/.json/.jsonl/.pdf/.docx/.xlsx/.xlsm")
 
 

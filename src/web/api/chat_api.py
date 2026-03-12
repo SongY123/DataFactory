@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agents.context import set_event_bus, set_workspace
-from agents.event_bus import EventBus, create_agent_error_event, create_agent_finish_event, create_agent_start_event
+from agents.event_bus import EventBus
 from utils.auth_guard import get_login_user
 from utils.config_loader import get_config
 from utils.logger import logger
@@ -409,7 +409,7 @@ async def chat(req: ChatRequest, request: Request):
 
     try:
         from agents.orchestrator import create_orchestrator
-        from agents.training_data_audit_pipeline import run_training_data_audit
+        from agents.iterative_file_analysis import run_iterative_file_analysis
         from agentscope.message import Msg
     except ImportError as exc:
         raise HTTPException(
@@ -464,63 +464,48 @@ async def chat(req: ChatRequest, request: Request):
 
             if selected_file_paths:
                 async def run_selected_file_analysis():
-                    lead_agent_name = "TrainingAuditLead"
                     total_files = len(selected_file_paths)
+                    completed_files = 0
+                    last_error: Exception | None = None
 
                     try:
-                        if total_files > 1:
-                            queued_files = "\n".join(
-                                f"{index}. {path}"
-                                for index, path in enumerate(selected_file_paths, start=1)
-                            )
-                            await event_bus.publish(await create_agent_start_event(
-                                lead_agent_name,
-                                task_description=(
-                                    f"Received {total_files} selected files. The existing audit workflow will run one file at a time.\n{queued_files}"
-                                ),
-                            ))
-
                         for index, current_file_path in enumerate(selected_file_paths, start=1):
-                            file_name = Path(current_file_path).name or current_file_path
-                            lead_task = (
-                                f"[{index}/{total_files}] Starting training-data audit: {file_name}\n"
-                                f"Relative path: {current_file_path}"
-                            ) if total_files > 1 else (
-                                f"Starting training-data structure, quality, and readiness audit: {current_file_path}"
-                            )
-                            await event_bus.publish(await create_agent_start_event(
-                                lead_agent_name,
-                                task_description=lead_task,
-                            ))
-
-                            final_summary = str(await run_training_data_audit(
-                                req.query,
-                                current_file_path,
-                                include_visualization=_should_run_visualization(req.query),
-                            ) or "").strip()
-
-                            if not final_summary:
-                                final_summary = (
-                                    "The training-data audit finished, but the downstream agents did not return a substantive report. "
-                                    "Please retry with a more specific quality question or inspect the upstream model output."
+                            try:
+                                final_summary = str(
+                                    await run_iterative_file_analysis(
+                                        req.query,
+                                        current_file_path,
+                                        workspace_dir,
+                                        file_index=index,
+                                        total_files=total_files,
+                                    )
+                                    or ""
+                                ).strip()
+                                if final_summary:
+                                    completed_files += 1
+                            except asyncio.CancelledError:
+                                logger.warning(
+                                    "AgentInteraction selected-file analysis cancelled during file run. session_id=%s file=%s",
+                                    session_id,
+                                    current_file_path,
                                 )
-
-                            if total_files > 1:
-                                final_summary = f"### [{index}/{total_files}] {file_name}\n\n{final_summary}"
-
-                            await event_bus.publish(await create_agent_finish_event(
-                                lead_agent_name,
-                                result=final_summary,
-                            ))
+                                raise
+                            except Exception as exc:
+                                last_error = exc
+                                logger.error(
+                                    "Iterative selected-file analysis failed. session_id=%s file=%s error=%s",
+                                    session_id,
+                                    current_file_path,
+                                    exc,
+                                    exc_info=True,
+                                )
+                                if total_files == 1:
+                                    raise
                     except asyncio.CancelledError:
                         logger.warning("AgentInteraction selected-file analysis cancelled. session_id=%s", session_id)
                         raise
-                    except Exception as exc:
-                        await event_bus.publish(await create_agent_error_event(
-                            lead_agent_name,
-                            exc,
-                        ))
-                        raise
+                    if completed_files == 0 and last_error is not None:
+                        raise last_error
 
                 runner_task = asyncio.create_task(run_selected_file_analysis())
             else:
