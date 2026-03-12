@@ -1,12 +1,8 @@
 ﻿from __future__ import annotations
 
-import csv
-import hashlib
-import io
 import json
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from urllib import error, request
 from uuid import uuid4
@@ -15,6 +11,7 @@ from fastapi import UploadFile
 
 from utils.config_loader import get_config
 from utils.logger import logger
+from .file_parser import AgentFileParser, FileParseError, ParsedFileContent
 
 
 class AgentReportService:
@@ -22,6 +19,7 @@ class AgentReportService:
         self._lock = threading.RLock()
         self._sessions: dict[str, dict[str, Any]] = {}
         self._models = self._resolve_models()
+        self._file_parser = AgentFileParser()
 
     @staticmethod
     def _resolve_models() -> list[str]:
@@ -30,7 +28,7 @@ class AgentReportService:
             models = [str(x).strip() for x in configured if str(x).strip()]
             if models:
                 return models
-        return ["gpt-4o-mini", "gpt-4.1-mini", "deepseek-chat", "qwen-max"]
+        return ["gpt-4o-mini"]
 
     @staticmethod
     def _trim_text(value: str | None) -> str:
@@ -44,134 +42,6 @@ class AgentReportService:
         if candidate:
             return candidate
         return self._models[0]
-
-    @staticmethod
-    def _decode_text(raw: bytes) -> str:
-        for enc in ("utf-8", "utf-8-sig", "gbk", "latin-1"):
-            try:
-                return raw.decode(enc)
-            except UnicodeDecodeError:
-                continue
-        return raw.decode("utf-8", errors="ignore")
-
-    @staticmethod
-    def _extract_pdf_preview(raw: bytes) -> dict[str, Any] | None:
-        try:
-            from pypdf import PdfReader
-        except Exception as exc:
-            return {
-                "page_count": 0,
-                "preview": f"[PDF support missing: failed to import pypdf: {exc}]",
-                "extractor": "none",
-            }
-
-        try:
-            reader = PdfReader(io.BytesIO(raw))
-            total_pages = len(reader.pages)
-            collected: list[str] = []
-
-            for page in reader.pages[:8]:
-                text = (page.extract_text() or "").strip()
-                if text:
-                    collected.append(text)
-
-            if not collected:
-                return {
-                    "page_count": total_pages,
-                    "preview": "[PDF text extraction returned empty content. This PDF may be image-only and requires OCR.]",
-                    "extractor": "pypdf",
-                }
-
-            merged = "\n\n".join(collected)
-            return {
-                "page_count": total_pages,
-                "preview": merged[:3000],
-                "extractor": "pypdf",
-            }
-        except Exception as exc:
-            logger.warning("Failed to parse PDF via pypdf: %s", exc)
-            return {
-                "page_count": 0,
-                "preview": f"[PDF parsing failed: {exc}]",
-                "extractor": "pypdf",
-            }
-
-    def _summarize_file(self, file_name: str, raw: bytes) -> dict[str, Any]:
-        suffix = Path(file_name).suffix.lower()
-        digest = hashlib.sha256(raw).hexdigest()
-        base: dict[str, Any] = {
-            "file_name": Path(file_name).name,
-            "file_ext": suffix or "unknown",
-            "size_bytes": len(raw),
-            "sha256": digest,
-        }
-
-        try:
-            if suffix == ".pdf":
-                pdf = self._extract_pdf_preview(raw)
-                if pdf is not None:
-                    base["preview"] = str(pdf.get("preview") or "")
-                    base["page_count"] = int(pdf.get("page_count") or 0)
-                    base["extractor"] = str(pdf.get("extractor") or "pypdf")
-                    preview_text = base["preview"]
-                    if preview_text:
-                        lines = [line for line in preview_text.splitlines() if line.strip()]
-                        base["line_preview"] = lines[:15]
-                    return base
-
-                base["preview"] = "[PDF parsing unavailable due to unknown runtime issue.]"
-                return base
-
-            if suffix == ".csv":
-                text = self._decode_text(raw)
-                reader = csv.reader(io.StringIO(text))
-                rows = [row for _, row in zip(range(6), reader)]
-                base["columns"] = rows[0] if rows else []
-                base["row_preview"] = rows[1:6] if len(rows) > 1 else []
-                base["preview"] = text[:1200]
-                return base
-
-            if suffix in {".json", ".geojson"}:
-                parsed = json.loads(self._decode_text(raw).strip() or "{}")
-                if isinstance(parsed, list):
-                    sample = parsed[:3]
-                    base["record_count_preview"] = len(sample)
-                    base["sample"] = sample
-                    if sample and isinstance(sample[0], dict):
-                        base["keys"] = sorted(sample[0].keys())[:30]
-                elif isinstance(parsed, dict):
-                    base["keys"] = sorted(parsed.keys())[:50]
-                    base["sample"] = parsed
-                else:
-                    base["sample"] = parsed
-                base["preview"] = json.dumps(base.get("sample"), ensure_ascii=False)[:1200]
-                return base
-
-            if suffix == ".jsonl":
-                rows: list[Any] = []
-                for line in self._decode_text(raw).splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rows.append(json.loads(line))
-                    if len(rows) >= 3:
-                        break
-                base["sample"] = rows
-                if rows and isinstance(rows[0], dict):
-                    base["keys"] = sorted(rows[0].keys())[:30]
-                base["preview"] = json.dumps(rows, ensure_ascii=False)[:1200]
-                return base
-
-            text_preview = self._decode_text(raw)[:2000]
-            base["preview"] = text_preview
-            if text_preview:
-                lines = [line for line in text_preview.splitlines() if line.strip()]
-                base["line_preview"] = lines[:10]
-            return base
-        except Exception as exc:
-            logger.warning("Failed to parse uploaded file as structured text: %s", exc)
-            base["preview"] = self._decode_text(raw)[:800]
-            return base
 
     def _build_runtime_llm(
         self,
@@ -211,8 +81,12 @@ class AgentReportService:
             return data.strip()
 
         if isinstance(data, dict):
+            choices = data.get("choices")
+            first_choice = choices[0] if isinstance(choices, list) and choices else {}
+            message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+
             candidates = [
-                data.get("choices", [{}])[0].get("message", {}).get("content") if isinstance(data.get("choices"), list) else None,
+                message.get("content") if isinstance(message, dict) else None,
                 data.get("response"),
                 data.get("answer"),
                 data.get("output"),
@@ -225,20 +99,88 @@ class AgentReportService:
 
         return None
 
-    def _invoke_llm(self, *, model: str, user_prompt: str, llm: dict[str, str]) -> str | None:
+    @staticmethod
+    def _extract_error_detail(raw: str) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+
+        try:
+            body = json.loads(text)
+        except json.JSONDecodeError:
+            return text[:240]
+
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                for key in ("message", "detail", "msg", "error"):
+                    value = err.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()[:240]
+            for key in ("detail", "message", "error", "msg"):
+                value = body.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()[:240]
+
+        return text[:240]
+
+    def _explain_llm_failure(self, *, exc: Exception, endpoint: str) -> str:
+        if isinstance(exc, TimeoutError):
+            return "Request timed out. Check model service latency or increase timeout."
+
+        if isinstance(exc, error.HTTPError):
+            status = int(getattr(exc, "code", 0) or 0)
+            raw = ""
+            try:
+                raw = exc.read().decode("utf-8", errors="ignore")
+            except Exception:
+                raw = ""
+            detail = self._extract_error_detail(raw)
+
+            if status == 404:
+                return f"Endpoint not found (404): {endpoint}. Check that it ends with /v1/chat/completions."
+            if status in {401, 403}:
+                base = "Authentication failed. Check API key or access policy."
+                return f"{base} Detail: {detail}" if detail else base
+            if status == 400:
+                base = "Bad request from model service. Check model name and payload format."
+                return f"{base} Detail: {detail}" if detail else base
+
+            base = f"Model service returned HTTP {status}."
+            return f"{base} Detail: {detail}" if detail else base
+
+        if isinstance(exc, error.URLError):
+            reason = getattr(exc, "reason", exc)
+            return f"Network error while connecting to model endpoint: {reason}"
+
+        if isinstance(exc, json.JSONDecodeError):
+            return "Model service returned invalid JSON. Check if endpoint is OpenAI-compatible."
+
+        return f"Model request failed: {exc}"
+
+    def _invoke_llm(self, *, model: str, payload: dict[str, Any], llm: dict[str, str]) -> tuple[str | None, str | None]:
         endpoint = self._trim_text(llm.get("endpoint"))
         if not endpoint:
-            return None
+            return None, None
 
         model_name = self._trim_text(llm.get("model_name")) or model
         api_key = self._trim_text(llm.get("api_key"))
         timeout = int(get_config("agent.llm.timeout_seconds", 60) or 60)
 
-        payload = {
+        llm_payload = {
             "model": model_name,
             "messages": [
-                {"role": "system", "content": "You are a data analyst agent. Return a concise markdown report."},
-                {"role": "user", "content": user_prompt},
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a senior data analyst. Use only parsed file context to answer. "
+                        "Never output raw binary, archive signatures, base64, hash digests, or debug traces."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False),
+                },
             ],
             "temperature": 0.2,
             "stream": False,
@@ -250,121 +192,140 @@ class AgentReportService:
 
         req = request.Request(
             endpoint,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps(llm_payload, ensure_ascii=False).encode("utf-8"),
             headers=headers,
             method="POST",
         )
 
+        provider = llm.get("provider") or "default"
         try:
             with request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8", errors="ignore")
+        except (TimeoutError, error.URLError, error.HTTPError) as exc:
+            reason = self._explain_llm_failure(exc=exc, endpoint=endpoint)
+            logger.warning("LLM call failed (%s): %s", provider, reason)
+            return None, reason
+
+        try:
             data = json.loads(raw)
-            return self._extract_llm_text(data)
-        except (TimeoutError, error.URLError, error.HTTPError, json.JSONDecodeError) as exc:
-            logger.warning("LLM call failed (%s), fallback to local report generation: %s", llm.get("provider") or "default", exc)
-            return None
+        except json.JSONDecodeError as exc:
+            reason = self._explain_llm_failure(exc=exc, endpoint=endpoint)
+            logger.warning("LLM response decode failed (%s): %s", provider, reason)
+            return None, reason
+
+        text = self._extract_llm_text(data)
+        if text:
+            return text, None
+
+        reason = "Model service returned empty or incompatible response format."
+        logger.warning("LLM response extraction failed (%s): %s", provider, reason)
+        return None, reason
+
+    @staticmethod
+    def _table_structure_lines(parsed: ParsedFileContent) -> list[str]:
+        lines: list[str] = []
+        for table in parsed.table_structures[:8]:
+            name = str(table.get("name") or "table")
+            columns = table.get("columns") or []
+            sample_rows = table.get("sample_rows") or []
+            lines.append(f"- {name}: {len(columns)} columns, {len(sample_rows)} sampled rows")
+        return lines
 
     def _build_local_report(
         self,
         *,
-        summary: dict[str, Any],
+        parsed: ParsedFileContent,
         prompt: str,
         model: str,
         previous_report: str | None = None,
     ) -> str:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        file_name = summary.get("file_name", "uploaded_file")
-        file_ext = summary.get("file_ext", "unknown")
-        size_bytes = int(summary.get("size_bytes") or 0)
-        preview = str(summary.get("preview", "")).strip()
+        structure_lines = self._table_structure_lines(parsed)
+        structure_block = structure_lines if structure_lines else ["- No table structure detected; analyzed as plain text document."]
 
-        preview_block = "```\n" + preview[:1500] + "\n```"
         if previous_report:
-            return "\n".join(
-                [
-                    "# Revised Analysis Report",
-                    f"- Model: `{model}`",
-                    f"- Revised At: `{now}`",
-                    f"- File: `{file_name}` ({file_ext}, {size_bytes} bytes)",
-                    "",
-                    "## Revision Prompt",
-                    prompt,
-                    "",
-                    "## Updated Report",
-                    "The report has been revised according to your prompt. Key updates:",
-                    f"1. Focus aligned to: {prompt}",
-                    "2. Risk and quality checks retained and tightened.",
-                    "3. Action plan reprioritized for immediate execution.",
-                    "",
-                    "## Current File Snapshot",
-                    preview_block,
-                    "",
-                    "## Prior Report (for traceability)",
-                    str(previous_report)[:1800],
-                ]
-            ).strip()
-
-        return "\n".join(
-            [
-                "# Analysis Report",
+            parts = [
+                "# Updated File Analysis",
                 f"- Model: `{model}`",
-                f"- Generated At: `{now}`",
-                f"- File: `{file_name}` ({file_ext}, {size_bytes} bytes)",
+                f"- Time: `{now}`",
                 "",
-                "## User Intent",
+                "## New Question",
                 prompt,
                 "",
-                "## File Overview",
-                f"- File hash (SHA-256): `{summary.get('sha256', '-')}`",
-                f"- Parsed keys/columns: `{summary.get('keys') or summary.get('columns') or []}`",
+                "## Updated Conclusion",
+                "1. Re-analyzed using parsed file context and your new question.",
+                "2. Output intentionally excludes raw binary and debug internals.",
                 "",
-                "## Core Observations",
-                "1. The file is readable and has extractable structured/textual content.",
-                "2. The sample preview suggests potential fields suitable for feature engineering and validation.",
-                "3. A schema consistency check should be run before downstream training/evaluation.",
+                "## File Profile",
+                f"- Name: `{parsed.file_name}`",
+                f"- Type: `{parsed.file_type}` ({parsed.mime_type})",
+                f"- Size: `{parsed.size_bytes}` bytes",
+                f"- Parser: `{parsed.parser}`",
                 "",
-                "## Risk And Quality Checks",
-                "- Missing values and outliers should be profiled.",
-                "- Field type conflicts should be normalized.",
-                "- Data leakage-sensitive columns should be reviewed.",
+                "## Structure",
+                *structure_block,
                 "",
-                "## Recommended Next Actions",
-                "1. Add schema + null-rate profiling job.",
-                "2. Define train/eval split policy and leakage guard.",
-                "3. Create task-specific feature extraction checklist.",
-                "",
-                "## Content Preview",
-                preview_block,
+                "## Recommended Next Steps",
+                "1. Validate high-risk fields first.",
+                "2. Run schema/null/outlier checks before downstream tasks.",
             ]
-        ).strip()
+            return "\n".join(parts).strip()
+
+        parts = [
+            "# File Analysis Result",
+            f"- Model: `{model}`",
+            f"- Time: `{now}`",
+            "",
+            "## User Question",
+            prompt,
+            "",
+            "## File Profile",
+            f"- Name: `{parsed.file_name}`",
+            f"- Type: `{parsed.file_type}` ({parsed.mime_type})",
+            f"- Size: `{parsed.size_bytes}` bytes",
+            f"- Parser: `{parsed.parser}`",
+            "",
+            "## Structure",
+            *structure_block,
+            "",
+            "## Key Findings",
+            "1. File content was parsed successfully and analyzed from structured context.",
+            "2. Model input excludes binary payload and corrupted text sequences.",
+            "3. You can continue with follow-up prompts for deeper analysis.",
+            "",
+            "## Risk and Actions",
+            "1. Validate schema and missing values.",
+            "2. Check outliers and inconsistent field formats.",
+            "3. Add quality gates before training/evaluation steps.",
+        ]
+        return "\n".join(parts).strip()
 
     def _compose_report(
         self,
         *,
-        summary: dict[str, Any],
+        parsed: ParsedFileContent,
         prompt: str,
         model: str,
         previous_report: str | None,
         llm: dict[str, str],
     ) -> str:
-        safe_prompt = self._trim_text(prompt) or "Please generate a structured analysis report for this file."
-        prompt_payload = {
+        safe_prompt = self._trim_text(prompt) or "Analyze this file and provide actionable conclusions."
+        payload = {
             "task": "revise_report" if previous_report else "initial_report",
-            "user_prompt": safe_prompt,
-            "file_summary": summary,
-            "previous_report": previous_report,
+            "user_question": safe_prompt,
+            "file_context": parsed.to_prompt_payload(),
+            "previous_report": previous_report or "",
         }
 
-        llm_text = self._invoke_llm(
-            model=model,
-            user_prompt=json.dumps(prompt_payload, ensure_ascii=False),
-            llm=llm,
-        )
+        llm_text, llm_error = self._invoke_llm(model=model, payload=payload, llm=llm)
         if llm_text:
             return llm_text
 
+        if self._trim_text(llm.get("endpoint")):
+            raise ValueError(f"Model is not correctly connected. {llm_error or 'Unknown model service error.'}")
+
         return self._build_local_report(
-            summary=summary,
+            parsed=parsed,
             prompt=safe_prompt,
             model=model,
             previous_report=previous_report,
@@ -388,16 +349,25 @@ class AgentReportService:
         if not raw:
             raise ValueError("uploaded file is empty")
 
-        summary = self._summarize_file(file.filename, raw)
+        try:
+            parsed = self._file_parser.parse(
+                file_name=file.filename,
+                content_type=file.content_type,
+                raw=raw,
+            )
+        except FileParseError as exc:
+            raise ValueError(str(exc)) from exc
+
         llm = self._build_runtime_llm(
             llm_provider=llm_provider,
             llm_endpoint=llm_endpoint,
             llm_api_key=llm_api_key,
             llm_model_name=llm_model_name,
         )
+
         chosen_model = self._select_model(model)
         report = self._compose_report(
-            summary=summary,
+            parsed=parsed,
             prompt=self._trim_text(prompt),
             model=chosen_model,
             previous_report=None,
@@ -408,8 +378,9 @@ class AgentReportService:
         with self._lock:
             self._sessions[session_id] = {
                 "session_id": session_id,
-                "file_name": summary.get("file_name"),
-                "summary": summary,
+                "file_name": parsed.file_name,
+                "file_type": parsed.file_type,
+                "parsed": parsed,
                 "model": chosen_model,
                 "llm": llm,
                 "report": report,
@@ -427,8 +398,8 @@ class AgentReportService:
             "session_id": session_id,
             "model": chosen_model,
             "llm": llm,
-            "file_name": summary.get("file_name"),
-            "summary": summary,
+            "file_name": parsed.file_name,
+            "file_type": parsed.file_type,
             "report": report,
         }
 
@@ -464,8 +435,12 @@ class AgentReportService:
             )
 
             chosen_model = self._select_model(model or current.get("model"))
+            parsed: ParsedFileContent = current.get("parsed")
+            if not parsed:
+                raise ValueError("session parsed content missing")
+
             updated_report = self._compose_report(
-                summary=current.get("summary") or {},
+                parsed=parsed,
                 prompt=user_prompt,
                 model=chosen_model,
                 previous_report=str(current.get("report") or ""),
@@ -489,6 +464,7 @@ class AgentReportService:
                 "model": chosen_model,
                 "llm": llm,
                 "file_name": current.get("file_name"),
+                "file_type": current.get("file_type"),
                 "report": updated_report,
                 "history_count": len(current.get("history") or []),
             }
@@ -520,7 +496,12 @@ class AgentReportService:
                 llm_api_key=llm_api_key,
                 llm_model_name=llm_model_name,
             )
-            return {"session_id": revised["session_id"], "model": revised["model"], "answer": revised["report"], "llm": revised["llm"]}
+            return {
+                "session_id": revised["session_id"],
+                "model": revised["model"],
+                "answer": revised["report"],
+                "llm": revised["llm"],
+            }
 
         llm = self._build_runtime_llm(
             llm_provider=llm_provider,
@@ -531,16 +512,21 @@ class AgentReportService:
 
         chosen_model = self._select_model(model)
         if self._trim_text(report):
-            report_text = str(report)
-            pseudo_summary = {
-                "file_name": "existing_report.md",
-                "file_ext": ".md",
-                "size_bytes": len(report_text.encode("utf-8")),
-                "preview": report_text[:1500],
-                "sha256": hashlib.sha256(report_text.encode("utf-8")).hexdigest(),
-            }
+            report_text = self._trim_text(report)
+            pseudo = ParsedFileContent(
+                file_name="existing_report.md",
+                file_type="md",
+                mime_type="text/markdown",
+                size_bytes=len(report_text.encode("utf-8")),
+                parser="inline-report",
+                text_summary=report_text[:4000],
+                table_structures=[],
+                sample_content=[],
+                warnings=[],
+                metadata={"source": "chat_report"},
+            )
             answer = self._compose_report(
-                summary=pseudo_summary,
+                parsed=pseudo,
                 prompt=user_text,
                 model=chosen_model,
                 previous_report=report_text,
@@ -548,12 +534,21 @@ class AgentReportService:
             )
             return {"model": chosen_model, "answer": answer, "llm": llm}
 
-        llm_answer = self._invoke_llm(model=chosen_model, user_prompt=user_text, llm=llm)
+        llm_answer, llm_error = self._invoke_llm(
+            model=chosen_model,
+            payload={"task": "chat", "user_question": user_text},
+            llm=llm,
+        )
         if llm_answer:
             return {"model": chosen_model, "answer": llm_answer, "llm": llm}
+
+        if self._trim_text(llm.get("endpoint")):
+            raise ValueError(f"Model is not correctly connected. {llm_error or 'Unknown model service error.'}")
 
         return {
             "model": chosen_model,
             "llm": llm,
             "answer": "No report session found. Upload a file first, then revise via prompts.",
         }
+
+

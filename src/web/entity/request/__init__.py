@@ -1,4 +1,5 @@
 ﻿from .auth_request import LoginRequest
+from .chat_request import ChatRequest
 from .dataset_request import DatasetCreateRequest, DatasetUpdateRequest
 from .agent_request import AgentChatRequest, AgentReviseRequest
 from .user_request import UserCreateRequest, UserUpdateRequest
@@ -6,6 +7,7 @@ from .agentic_synthesis_request import AgenticDatasetRequest, AgenticSynthesisSt
 
 __all__ = [
     "LoginRequest",
+    "ChatRequest",
     "DatasetCreateRequest",
     "DatasetUpdateRequest",
     "AgentChatRequest",
