@@ -13,54 +13,69 @@ from ..entity.model import AgenticSynthesisTask
 class AgenticSynthesisTaskDAO(BaseDAO):
     def insert_task(
         self,
+        user_id: int,
+        dataset_id: int,
         prompt_text: str,
         action_tags: List[str],
         llm_api_key: str,
         llm_base_url: str,
         llm_model_name: str,
-        dataset_paths: List[str],
         output_file_path: str,
-        total_files: int,
+        total_workspaces: int,
     ) -> AgenticSynthesisTask:
         with self.session_scope() as session:
             task = AgenticSynthesisTask(
+                user_id=int(user_id),
+                dataset_id=int(dataset_id),
                 prompt_text=prompt_text,
                 action_tags_json=json.dumps(action_tags, ensure_ascii=False),
                 llm_api_key=llm_api_key,
                 llm_base_url=llm_base_url,
                 llm_model_name=llm_model_name,
-                dataset_paths_json=json.dumps(dataset_paths, ensure_ascii=False),
                 output_file_path=output_file_path,
-                status="pending",
-                total_files=int(total_files),
-                processed_files=0,
-                success_files=0,
-                failed_files=0,
+                total_workspaces=int(total_workspaces),
+                processed_workspaces=0,
             )
             session.add(task)
             session.flush()
             session.refresh(task)
             return task
 
-    def get_task_by_id(self, task_id: int) -> Optional[AgenticSynthesisTask]:
+    def get_task_by_id(self, task_id: int, user_id: Optional[int] = None) -> Optional[AgenticSynthesisTask]:
         with self.session_scope() as session:
-            return session.get(AgenticSynthesisTask, int(task_id))
+            stmt = select(AgenticSynthesisTask).where(AgenticSynthesisTask.id == int(task_id))
+            if user_id is not None:
+                stmt = stmt.where(AgenticSynthesisTask.user_id == int(user_id))
+            return session.execute(stmt).scalars().first()
 
-    def list_tasks(self, limit: int = 20) -> List[AgenticSynthesisTask]:
+    def list_tasks(self, limit: int = 20, user_id: Optional[int] = None) -> List[AgenticSynthesisTask]:
         safe_limit = max(1, min(int(limit), 200))
         with self.session_scope() as session:
             stmt = select(AgenticSynthesisTask).order_by(AgenticSynthesisTask.id.desc()).limit(safe_limit)
+            if user_id is not None:
+                stmt = stmt.where(AgenticSynthesisTask.user_id == int(user_id))
             return list(session.execute(stmt).scalars().all())
 
-    def mark_running(self, task_id: int) -> Optional[AgenticSynthesisTask]:
+    def mark_started(self, task_id: int) -> Optional[AgenticSynthesisTask]:
         with self.session_scope() as session:
             task = session.get(AgenticSynthesisTask, int(task_id))
             if task is None:
                 return None
             now = datetime.utcnow()
-            task.status = "running"
             task.started_time = now
             task.update_time = now
+            session.add(task)
+            session.flush()
+            session.refresh(task)
+            return task
+
+    def update_output_file_path(self, task_id: int, output_file_path: str) -> Optional[AgenticSynthesisTask]:
+        with self.session_scope() as session:
+            task = session.get(AgenticSynthesisTask, int(task_id))
+            if task is None:
+                return None
+            task.output_file_path = str(output_file_path)
+            task.update_time = datetime.utcnow()
             session.add(task)
             session.flush()
             session.refresh(task)
@@ -69,9 +84,7 @@ class AgenticSynthesisTaskDAO(BaseDAO):
     def update_progress(
         self,
         task_id: int,
-        processed_files: int,
-        success_files: int,
-        failed_files: int,
+        processed_workspaces: int,
         error_message: Optional[str] = None,
     ) -> Optional[AgenticSynthesisTask]:
         with self.session_scope() as session:
@@ -79,9 +92,7 @@ class AgenticSynthesisTaskDAO(BaseDAO):
             if task is None:
                 return None
             now = datetime.utcnow()
-            task.processed_files = int(processed_files)
-            task.success_files = int(success_files)
-            task.failed_files = int(failed_files)
+            task.processed_workspaces = int(processed_workspaces)
             task.error_message = error_message
             task.update_time = now
             session.add(task)
@@ -92,10 +103,7 @@ class AgenticSynthesisTaskDAO(BaseDAO):
     def mark_finished(
         self,
         task_id: int,
-        status: str,
-        processed_files: int,
-        success_files: int,
-        failed_files: int,
+        processed_workspaces: int,
         error_message: Optional[str] = None,
     ) -> Optional[AgenticSynthesisTask]:
         with self.session_scope() as session:
@@ -103,10 +111,7 @@ class AgenticSynthesisTaskDAO(BaseDAO):
             if task is None:
                 return None
             now = datetime.utcnow()
-            task.status = status
-            task.processed_files = int(processed_files)
-            task.success_files = int(success_files)
-            task.failed_files = int(failed_files)
+            task.processed_workspaces = int(processed_workspaces)
             task.finished_time = now
             task.error_message = error_message
             task.update_time = now

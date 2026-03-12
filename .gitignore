@@ -12,3 +12,7 @@ logs/
 tmp/
 
 outputs/
+
+uploads/
+
+output/

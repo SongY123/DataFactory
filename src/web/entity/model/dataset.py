@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict
 
-from sqlalchemy import Column, DateTime, Integer, String, Text, text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, text
 from sqlalchemy.orm import validates
 
 from .base import Base
@@ -21,6 +21,7 @@ class Dataset(Base):
     __tablename__ = "datasets"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     name = Column(String(128), nullable=False, index=True)
     type = Column(String(32), nullable=False, default="instruction", server_default=text("'instruction'"))
     source = Column(String(1024), nullable=True)
@@ -66,6 +67,7 @@ class Dataset(Base):
     def to_dict(self, include_internal: bool = False) -> Dict:
         data = {
             "id": self.id,
+            "user_id": self.user_id,
             "name": self.name,
             "type": self.type,
             "source": self.source,
