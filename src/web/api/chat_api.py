@@ -3,15 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from pathlib import Path
 from contextlib import suppress
 from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agents.context import set_event_bus, set_workspace
-from agents.event_bus import EventBus, create_agent_finish_event
+from agents.event_bus import EventBus, create_agent_error_event, create_agent_finish_event, create_agent_start_event
 from utils.auth_guard import get_login_user
 from utils.config_loader import get_config
 from utils.logger import logger
@@ -21,6 +22,9 @@ from web.service.agent_asset_service import AgentAssetService
 
 router = APIRouter(tags=["agent-interaction"])
 _asset_service = AgentAssetService()
+_WEB_ROOT = Path(__file__).resolve().parents[1]
+_BACKEND_ROOT = Path(__file__).resolve().parents[3]
+_ARTIFACT_FALLBACK_BASES = (_WEB_ROOT, _BACKEND_ROOT, Path.cwd())
 
 
 class FolderCreateBody(BaseModel):
@@ -30,6 +34,40 @@ class FolderCreateBody(BaseModel):
 
 def _sse(event: str, data: Any) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _resolve_under_base(base_dir: Path, relative_path: str) -> Path | None:
+    base_resolved = base_dir.resolve()
+    target = (base_resolved / relative_path).resolve()
+    if target != base_resolved and base_resolved not in target.parents:
+        return None
+    if not target.exists() or not target.is_file():
+        return None
+    return target
+
+
+def _resolve_chat_artifact_file(user_id: int, workspace_name: str | None, artifact_path: str) -> Path:
+    normalized = _asset_service.normalize_artifact_path(artifact_path)
+
+    if workspace_name:
+        try:
+            runtime_target = _asset_service.resolve_runtime_artifact(user_id, workspace_name, normalized)
+            if runtime_target.exists() and runtime_target.is_file():
+                return runtime_target
+        except ValueError:
+            pass
+
+    checked_bases: set[str] = set()
+    for base_dir in _ARTIFACT_FALLBACK_BASES:
+        base_key = str(base_dir.resolve())
+        if base_key in checked_bases:
+            continue
+        checked_bases.add(base_key)
+        candidate = _resolve_under_base(base_dir, normalized)
+        if candidate is not None:
+            return candidate
+
+    raise ValueError(f"Artifact file not found: {normalized}")
 
 
 def _build_effective_query(query: str, selected_file_path: str | None, workspace_dir) -> tuple[str, str | None]:
@@ -52,6 +90,33 @@ def _build_effective_query(query: str, selected_file_path: str | None, workspace
         f"{raw_query}"
     )
     return instruction, normalized_path
+
+
+def _resolve_selected_file_paths(
+    selected_file_path: str | None,
+    selected_file_paths: list[str] | None,
+    workspace_dir,
+) -> list[str]:
+    raw_paths: list[str] = []
+    if str(selected_file_path or "").strip():
+        raw_paths.append(str(selected_file_path))
+
+    if isinstance(selected_file_paths, (list, tuple, set)):
+        raw_paths.extend(str(item) for item in selected_file_paths)
+    elif isinstance(selected_file_paths, str) and selected_file_paths.strip():
+        raw_paths.append(selected_file_paths)
+
+    normalized_paths: list[str] = []
+    seen: set[str] = set()
+    for raw_path in raw_paths:
+        normalized = _asset_service.normalize_asset_path(raw_path, allow_empty=False)
+        _asset_service.resolve_file_under(workspace_dir, normalized)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        normalized_paths.append(normalized)
+
+    return normalized_paths
 
 
 def _resolve_effective_provider(selected_model_override: dict[str, Any] | None) -> str:
@@ -300,6 +365,19 @@ async def upload_file(request: Request, file: UploadFile = File(...), folder_pat
     }
 
 
+@router.get("/chat/artifact")
+def get_chat_artifact(request: Request, path: str = Query(...), workspace: str | None = Query(default=None)):
+    user = get_login_user(request)
+    try:
+        artifact = _resolve_chat_artifact_file(int(user["id"]), workspace, path)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if 'not found' in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+    return FileResponse(artifact)
+
+
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
     user = get_login_user(request)
@@ -318,15 +396,20 @@ async def chat(req: ChatRequest, request: Request):
     workspace_dir = runtime["workspace_dir"]
 
     try:
-        effective_query, selected_file_path = _build_effective_query(req.query, req.selected_file_path, workspace_dir)
+        selected_file_paths = _resolve_selected_file_paths(
+            req.selected_file_path,
+            req.selected_file_paths,
+            workspace_dir,
+        )
+        effective_query, _ = _build_effective_query(req.query, None, workspace_dir)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    primary_selected_file_path = selected_file_paths[0] if selected_file_paths else None
+
     try:
-        from agents.business_consultant_worker import create_business_consultant_worker
-        from agents.data_analyst_worker import create_data_analyst_worker
         from agents.orchestrator import create_orchestrator
-        from agents.visualization_worker import create_visualization_worker
+        from agents.training_data_audit_pipeline import run_training_data_audit
         from agentscope.message import Msg
     except ImportError as exc:
         raise HTTPException(
@@ -345,12 +428,12 @@ async def chat(req: ChatRequest, request: Request):
     model_debug = _build_model_debug_info(selected_model_override)
 
     logger.info(
-        "AgentInteraction chat request received. user_id=%s username=%s session_id=%s workspace=%s selected_file=%s provider=%s model=%s endpoint=%s",
+        "AgentInteraction chat request received. user_id=%s username=%s session_id=%s workspace=%s selected_files=%s provider=%s model=%s endpoint=%s",
         user_id,
         username,
         session_id,
         workspace_dir,
-        selected_file_path or "",
+        ",".join(selected_file_paths),
         model_debug["provider"],
         model_debug["model_name"],
         model_debug["endpoint"],
@@ -373,86 +456,70 @@ async def chat(req: ChatRequest, request: Request):
                     "user_id": user_id,
                     "username": username,
                     "workspace": workspace_name,
-                    "selected_file_path": selected_file_path,
+                    "selected_file_path": primary_selected_file_path,
+                    "selected_file_paths": selected_file_paths,
                     "model": selected_model_override,
                 },
             )
 
-            if selected_file_path:
+            if selected_file_paths:
                 async def run_selected_file_analysis():
+                    lead_agent_name = "TrainingAuditLead"
+                    total_files = len(selected_file_paths)
+
                     try:
-                        collected_sections: list[str] = []
-
-                        analyst_response = await create_data_analyst_worker(
-                            task_description=_build_selected_file_analysis_task(req.query, selected_file_path),
-                            file_paths=[selected_file_path],
-                            display_task_description=req.query or f"Analyze {selected_file_path}",
-                        )
-                        analyst_output = _extract_tool_response_text(analyst_response).strip()
-                        has_analyst_output = _append_analysis_section(
-                            collected_sections,
-                            "Data Analyst",
-                            analyst_output,
-                            req.query,
-                        )
-
-                        if has_analyst_output:
-                            consultant_response = await create_business_consultant_worker(
+                        if total_files > 1:
+                            queued_files = "\n".join(
+                                f"{index}. {path}"
+                                for index, path in enumerate(selected_file_paths, start=1)
+                            )
+                            await event_bus.publish(await create_agent_start_event(
+                                lead_agent_name,
                                 task_description=(
-                                    "Continue the analysis based on the completed dataset findings.\n"
-                                    f"Selected file: {selected_file_path}\n"
-                                    "Provide deeper interpretation, business meaning, risks, and practical next actions.\n"
-                                    "Build on the actual analysis results instead of repeating boilerplate.\n\n"
-                                    "Original user request:\n"
-                                    f"{req.query}"
+                                    f"Received {total_files} selected files. The existing audit workflow will run one file at a time.\n{queued_files}"
                                 ),
-                                analysis_data=analyst_output,
+                            ))
+
+                        for index, current_file_path in enumerate(selected_file_paths, start=1):
+                            file_name = Path(current_file_path).name or current_file_path
+                            lead_task = (
+                                f"[{index}/{total_files}] Starting training-data audit: {file_name}\n"
+                                f"Relative path: {current_file_path}"
+                            ) if total_files > 1 else (
+                                f"Starting training-data structure, quality, and readiness audit: {current_file_path}"
                             )
-                            consultant_output = _extract_tool_response_text(consultant_response).strip()
-                            if not _append_analysis_section(
-                                collected_sections,
-                                "Business Consultant",
-                                consultant_output,
+                            await event_bus.publish(await create_agent_start_event(
+                                lead_agent_name,
+                                task_description=lead_task,
+                            ))
+
+                            final_summary = str(await run_training_data_audit(
                                 req.query,
-                            ):
-                                logger.info(
-                                    "Skipping empty BusinessConsultant output. session_id=%s selected_file=%s",
-                                    session_id,
-                                    selected_file_path,
+                                current_file_path,
+                                include_visualization=_should_run_visualization(req.query),
+                            ) or "").strip()
+
+                            if not final_summary:
+                                final_summary = (
+                                    "The training-data audit finished, but the downstream agents did not return a substantive report. "
+                                    "Please retry with a more specific quality question or inspect the upstream model output."
                                 )
 
-                            if _should_run_visualization(req.query):
-                                visualization_response = await create_visualization_worker(
-                                    analysis_data=analyst_output,
-                                    custom_requirements=req.query,
-                                )
-                                visualization_output = _extract_tool_response_text(visualization_response).strip()
-                                if not _append_analysis_section(
-                                    collected_sections,
-                                    "Visualization",
-                                    visualization_output,
-                                    req.query,
-                                ):
-                                    logger.info(
-                                        "Skipping empty Visualization output. session_id=%s selected_file=%s",
-                                        session_id,
-                                        selected_file_path,
-                                    )
-                        else:
-                            logger.warning(
-                                "Selected-file analysis produced no meaningful DataAnalyst output. session_id=%s selected_file=%s",
-                                session_id,
-                                selected_file_path,
-                            )
+                            if total_files > 1:
+                                final_summary = f"### [{index}/{total_files}] {file_name}\n\n{final_summary}"
 
-                        final_summary = "\n\n".join(collected_sections).strip()
-                        if final_summary:
                             await event_bus.publish(await create_agent_finish_event(
-                                "Orchestrator",
+                                lead_agent_name,
                                 result=final_summary,
                             ))
                     except asyncio.CancelledError:
                         logger.warning("AgentInteraction selected-file analysis cancelled. session_id=%s", session_id)
+                        raise
+                    except Exception as exc:
+                        await event_bus.publish(await create_agent_error_event(
+                            lead_agent_name,
+                            exc,
+                        ))
                         raise
 
                 runner_task = asyncio.create_task(run_selected_file_analysis())

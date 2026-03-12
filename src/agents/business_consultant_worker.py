@@ -37,6 +37,7 @@ async def create_business_consultant_worker(
     task_description: str,
     analysis_data: Optional[str] = None,
     display_task_description: Optional[str] = None,
+    agent_name: str = "BusinessConsultant",
 ) -> ToolResponse:
     """
     创建业务顾问 Worker
@@ -55,7 +56,7 @@ async def create_business_consultant_worker(
     # 发送开始事件
     if event_bus:
         await event_bus.publish(await create_agent_start_event(
-            "BusinessConsultant",
+            agent_name,
             task_description=display_task_description or task_description
         ))
     
@@ -76,7 +77,7 @@ async def create_business_consultant_worker(
 """
         
         worker = ReActAgent(
-        name="BusinessConsultantWorker",
+        name=f"{agent_name}Worker",
         sys_prompt=BUSINESS_CONSULTANT_PROMPT,
         model=create_model(),
         formatter=get_formatter(),
@@ -84,7 +85,7 @@ async def create_business_consultant_worker(
         )
         
         # ====== 注册流式输出钩子 ======
-        register_streaming_hook(worker, "BusinessConsultant")
+        register_streaming_hook(worker, agent_name)
         
         print(f"\n💼 [BusinessConsultantWorker] 开始解读数据：{task_description}")
         result = await worker(Msg("user", full_task, "user"))
@@ -94,7 +95,7 @@ async def create_business_consultant_worker(
         print(f"✅ [BusinessConsultantWorker] 洞察完成\n")
         if event_bus:
             await event_bus.publish(await create_agent_finish_event(
-                "BusinessConsultant",
+                agent_name,
                 result=content
             ))
 
@@ -104,7 +105,7 @@ async def create_business_consultant_worker(
         # 发送错误事件
         if event_bus:
             await event_bus.publish(await create_agent_error_event(
-                "BusinessConsultant",
+                agent_name,
                 e
             ))
         raise

@@ -28,6 +28,10 @@ class ChatRequest(BaseModel):
         max_length=500,
         description="Optional relative file path explicitly selected by the user",
     )
+    selected_file_paths: list[str] | None = Field(
+        default=None,
+        description="Optional relative file paths explicitly selected by the user for sequential analysis",
+    )
     selected_model: ChatModelConfig | None = Field(
         default=None,
         alias="model_config",

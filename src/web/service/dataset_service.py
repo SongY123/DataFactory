@@ -13,6 +13,8 @@ from ..dao import DatasetDAO
 
 
 class DatasetService:
+    SAMPLE_PREVIEW_LIMIT = 20
+
     def __init__(self, dataset_dao: Optional[DatasetDAO] = None, upload_dir: Optional[Path] = None) -> None:
         self.dataset_dao = dataset_dao or DatasetDAO()
         self.upload_dir = upload_dir or (Path(__file__).resolve().parents[3] / "uploads")
@@ -25,7 +27,7 @@ class DatasetService:
         if suffix == ".csv":
             text = raw.decode("utf-8", errors="ignore")
             reader = csv.DictReader(io.StringIO(text))
-            return [dict(row) for _, row in zip(range(5), reader)]
+            return [dict(row) for _, row in zip(range(DatasetService.SAMPLE_PREVIEW_LIMIT), reader)]
 
         if suffix == ".json":
             text = raw.decode("utf-8", errors="ignore").strip()
@@ -33,7 +35,7 @@ class DatasetService:
                 return []
             parsed = json.loads(text)
             if isinstance(parsed, list):
-                return [item for item in parsed[:5] if isinstance(item, dict)]
+                return [item for item in parsed[:DatasetService.SAMPLE_PREVIEW_LIMIT] if isinstance(item, dict)]
             if isinstance(parsed, dict):
                 return [parsed]
             return [{"value": parsed}]
@@ -46,7 +48,7 @@ class DatasetService:
                     continue
                 parsed = json.loads(line)
                 rows.append(parsed if isinstance(parsed, dict) else {"value": parsed})
-                if len(rows) >= 5:
+                if len(rows) >= DatasetService.SAMPLE_PREVIEW_LIMIT:
                     break
             return rows
 

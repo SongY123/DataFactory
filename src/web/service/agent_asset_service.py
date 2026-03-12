@@ -13,6 +13,7 @@ from utils.config_loader import get_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xlsm", ".json", ".jsonl"}
+_ALLOWED_ARTIFACT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
 _INVALID_PATH_CHARS = set('<>:"|?*\0')
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
@@ -227,6 +228,41 @@ class AgentAssetService:
 
     def normalize_asset_path(self, path: str | None, *, allow_empty: bool = False) -> str:
         return self._normalize_relative_path(path, allow_empty=allow_empty)
+
+    def normalize_workspace_name(self, value: str | None) -> str:
+        return self._validate_workspace_name(value)
+
+    def normalize_artifact_path(self, path: str | None) -> str:
+        raw = str(path or '').strip().replace('\\', '/').strip()
+        if not raw:
+            raise ValueError('Artifact path is required.')
+
+        while raw.startswith('./'):
+            raw = raw[2:]
+
+        if raw.startswith('../output/'):
+            raw = raw[3:]
+        elif raw.startswith('../charts/'):
+            raw = f"output/charts/{raw[len('../charts/') :]}"
+        elif raw.startswith('charts/'):
+            raw = f"output/charts/{raw[len('charts/') :]}"
+        elif raw.startswith('./charts/'):
+            raw = f"output/charts/{raw[len('./charts/') :]}"
+
+        normalized = self._normalize_relative_path(raw.lstrip('/'), allow_empty=False)
+        suffix = Path(normalized).suffix.lower()
+        if suffix not in _ALLOWED_ARTIFACT_EXTENSIONS:
+            raise ValueError(f'Unsupported artifact type: {suffix or normalized}')
+        return normalized
+
+    def resolve_runtime_artifact(self, user_id: int, workspace_name: str | None, artifact_path: str | None) -> Path:
+        workspace = self._validate_workspace_name(workspace_name)
+        normalized = self.normalize_artifact_path(artifact_path)
+        runtime_dir = self.runtime_root(user_id) / workspace
+        target = self._resolve_under(runtime_dir, normalized)
+        if not target.exists() or not target.is_file():
+            raise ValueError('Artifact file does not exist.')
+        return target
 
     def resolve_file_under(self, base_dir: Path, path: str | None) -> Path:
         normalized = self._normalize_relative_path(path, allow_empty=False)

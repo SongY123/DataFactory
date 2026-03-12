@@ -43,7 +43,9 @@ from agents.event_bus import (
 
 async def create_report_writer_worker(
     task_description: str,
-    all_results: Optional[str] = None
+    all_results: Optional[str] = None,
+    display_task_description: Optional[str] = None,
+    agent_name: str = "ReportWriter",
 ) -> ToolResponse:
     """
     创建报告写作者 Worker
@@ -62,8 +64,8 @@ async def create_report_writer_worker(
     # 发送开始事件
     if event_bus:
         await event_bus.publish(await create_agent_start_event(
-            "ReportWriter",
-            task_description=task_description
+            agent_name,
+            task_description=display_task_description or task_description
         ))
     
     try:
@@ -93,7 +95,7 @@ async def create_report_writer_worker(
         os.makedirs("output/reports", exist_ok=True)
         
         worker = ReActAgent(
-        name="ReportWriterWorker",
+        name=f"{agent_name}Worker",
         sys_prompt=REPORT_WRITER_PROMPT,
         model=create_model(),
         formatter=get_formatter(),
@@ -101,17 +103,27 @@ async def create_report_writer_worker(
         )
         
         # ====== 注册流式输出钩子 ======
-        register_streaming_hook(worker, "ReportWriter")
+        register_streaming_hook(worker, agent_name)
         
         print(f"\n📝 [ReportWriterWorker] 开始撰写报告：{task_description}")
         result = await worker(Msg("user", full_task, "user"))
         
-        content = extract_agent_result_text(result)
-        
-        print(f"✅ [ReportWriterWorker] 报告完成\n")
+        content = extract_agent_result_text(result).strip()
+        report_path = os.path.join("output", "reports", "data_analysis_report.md")
+        if not content and os.path.exists(report_path):
+            try:
+                with open(report_path, "r", encoding="utf-8") as report_file:
+                    content = report_file.read().strip()
+            except OSError:
+                pass
+
+        if not content and all_results:
+            content = "# \u8bad\u7ec3\u6570\u636e\u5ba1\u8ba1\u62a5\u544a" + chr(10) + chr(10) + all_results.strip()
+
+        print("[ReportWriterWorker] report completed")
         if event_bus:
             await event_bus.publish(await create_agent_finish_event(
-                "ReportWriter",
+                agent_name,
                 result=content
             ))
 
@@ -121,7 +133,7 @@ async def create_report_writer_worker(
         # 发送错误事件
         if event_bus:
             await event_bus.publish(await create_agent_error_event(
-                "ReportWriter",
+                agent_name,
                 e
             ))
         raise

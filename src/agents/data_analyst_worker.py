@@ -50,6 +50,7 @@ async def create_data_analyst_worker(
     task_description: str,
     file_paths: Optional[List[str]] = None,
     display_task_description: Optional[str] = None,
+    agent_name: str = "DataAnalyst",
 ) -> ToolResponse:
     """
     数据分析工具,执行智能而专业的数据分析任务
@@ -139,7 +140,7 @@ async def create_data_analyst_worker(
     # 发送开始事件
     if event_bus:
         await event_bus.publish(await create_agent_start_event(
-            "DataAnalyst",
+            agent_name,
             task_description=display_task_description or task_description
         ))
     
@@ -173,7 +174,7 @@ async def create_data_analyst_worker(
         
         # 创建数据分析师 Agent
         worker = ReActAgent(
-        name="DataAnalystWorker",
+        name=f"{agent_name}Worker",
         sys_prompt=DATA_ANALYST_PROMPT,
         model=create_model(),
         formatter=get_formatter(),
@@ -182,7 +183,7 @@ async def create_data_analyst_worker(
     )
         
         # ====== 注册流式输出钩子 ======
-        register_streaming_hook(worker, "DataAnalyst")
+        register_streaming_hook(worker, agent_name)
         
         # 构建任务消息
         enhanced_task = task_description
@@ -209,7 +210,7 @@ async def create_data_analyst_worker(
         # 返回ToolResponse，content必须是TextBlock列表
         if event_bus:
             await event_bus.publish(await create_agent_finish_event(
-                "DataAnalyst",
+                agent_name,
                 result=content
             ))
 
@@ -219,7 +220,7 @@ async def create_data_analyst_worker(
         # 发送错误事件
         if event_bus:
             await event_bus.publish(await create_agent_error_event(
-                "DataAnalyst",
+                agent_name,
                 e
             ))
         raise
