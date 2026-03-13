@@ -15,7 +15,6 @@ DataAnalystWorker - 数据分析师 Agent
 """
 
 from typing import Optional, List
-from utils.config_loader import get_config
 from utils.model_factory import create_model, get_formatter
 from agentscope.agent import ReActAgent
 from agentscope.memory import InMemoryMemory

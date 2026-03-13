@@ -4,7 +4,6 @@ TableFinder Worker Agent
 """
 
 import os
-from utils.config_loader import get_config
 from utils.model_factory import create_model, get_formatter
 from agentscope.agent import ReActAgent
 from agentscope.tool import Toolkit, ToolResponse
@@ -26,6 +25,7 @@ from agents.event_bus import (
     create_agent_finish_event,
     create_agent_error_event,
 )
+from agents.result_utils import extract_agent_result_text
 
 
 async def create_table_finder_worker(

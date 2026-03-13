@@ -12,9 +12,7 @@ BusinessConsultantWorker - 业务顾问 Agent
     - 无（纯 LLM 推理，不需要工具）
 """
 
-import os
 from typing import Optional
-from utils.config_loader import get_config
 from utils.model_factory import create_model, get_formatter
 from agentscope.agent import ReActAgent
 from agentscope.memory import InMemoryMemory

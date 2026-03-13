@@ -20,7 +20,6 @@ VisualizationWorker - 可视化专家 Agent
 
 import os
 from typing import Optional
-from utils.config_loader import get_config
 from utils.model_factory import create_model, get_formatter
 from agentscope.agent import ReActAgent
 from agentscope.memory import InMemoryMemory

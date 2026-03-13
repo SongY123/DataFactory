@@ -1,6 +1,5 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-import os
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Callable, Optional
@@ -10,8 +9,9 @@ from utils.config_loader import get_config
 
 try:
     from agentscope.message import Msg
-except ImportError:  # Keep module importable before optional agent deps are installed.
+except ImportError:
     Msg = None
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -85,5 +85,4 @@ def create_streaming_hook(agent_name: str) -> Callable:
 
 
 def register_streaming_hook(worker, agent_name: str) -> None:
-    hook = create_streaming_hook(agent_name)
-    worker._instance_pre_print_hooks["streaming_output"] = hook
+    worker._instance_pre_print_hooks["streaming_output"] = create_streaming_hook(agent_name)
