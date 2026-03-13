@@ -62,8 +62,7 @@ class DatasetService:
         text = str(value).strip()
         return text or None
 
-    def _to_payload(self, row: Dict) -> Dict:
-        sample_data = row.get("sample_data")
+    def _decode_sample_data(self, sample_data) -> List[Dict]:
         if isinstance(sample_data, str) and sample_data.strip():
             try:
                 sample_data = json.loads(sample_data)
@@ -71,6 +70,52 @@ class DatasetService:
                 sample_data = [{"preview": sample_data}]
         elif not sample_data:
             sample_data = []
+
+        if isinstance(sample_data, list):
+            return sample_data[: self.SAMPLE_PREVIEW_LIMIT]
+        if isinstance(sample_data, dict):
+            return [sample_data]
+        return []
+
+    def _resolve_dataset_file_path(self, row: Dict) -> Optional[Path]:
+        raw_path = row.get("file_path")
+        if raw_path:
+            path = Path(raw_path)
+            if path.is_file():
+                return path
+
+        file_name = Path(str(row.get("file_name") or "")).name
+        if not file_name:
+            return None
+
+        try:
+            candidates = sorted(
+                self.upload_dir.glob(f"*_{file_name}"),
+                key=lambda candidate: candidate.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return None
+        return candidates[0] if candidates else None
+
+    def _load_sample_data(self, row: Dict, refresh_from_file: bool = False) -> List[Dict]:
+        sample_data = self._decode_sample_data(row.get("sample_data"))
+        if not refresh_from_file or len(sample_data) >= self.SAMPLE_PREVIEW_LIMIT:
+            return sample_data
+
+        dataset_file = self._resolve_dataset_file_path(row)
+        if dataset_file is None:
+            return sample_data
+
+        try:
+            refreshed = self._parse_samples(row.get("file_name") or dataset_file.name, dataset_file.read_bytes())
+        except Exception:
+            return sample_data
+
+        return refreshed if len(refreshed) > len(sample_data) else sample_data
+
+    def _to_payload(self, row: Dict, refresh_samples: bool = False) -> Dict:
+        sample_data = self._load_sample_data(row, refresh_from_file=refresh_samples)
 
         dataset_id = row.get("id")
         cover_url = f"/api/datasets/{dataset_id}/cover" if row.get("cover_path") else None
@@ -122,7 +167,7 @@ class DatasetService:
         row = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id)
         if row is None:
             return None
-        return self._to_payload(row.to_dict(include_internal=True))
+        return self._to_payload(row.to_dict(include_internal=True), refresh_samples=True)
 
     def get_cover_path(self, dataset_id: int) -> Optional[str]:
         row = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id)
@@ -212,13 +257,16 @@ class DatasetService:
         samples = self._parse_samples(first_name, first_bytes)
 
         total_size = 0
+        first_file_path: Optional[str] = None
         for idx, up in enumerate(upload_list):
             if idx == 0:
                 content = first_bytes
             else:
                 content = await up.read()
             total_size += len(content)
-            self._save_upload_bytes(up.filename or f"file-{idx}", content)
+            saved_path = self._save_upload_bytes(up.filename or f"file-{idx}", content)
+            if idx == 0:
+                first_file_path = saved_path
 
         cover_path = await self._save_cover(cover)
 
@@ -232,7 +280,7 @@ class DatasetService:
                 "status": "uploaded",
                 "note": self._normalize_text(note),
                 "file_name": Path(first_name).name,
-                "file_path": None,
+                "file_path": first_file_path,
                 "cover_path": cover_path,
                 "sample_data": json.dumps(samples, ensure_ascii=False),
             }
