@@ -1,17 +1,17 @@
 """
-ReportWriterWorker - 报告写作者 Agent
-======================================
+ReportWriterWorker - Report writer agent
+========================================
 
-职责：
-    - 整合所有分析结果
-    - 撰写结构化的 Markdown 分析报告
-    - 在报告中引用可视化图表
-    - 保存报告到文件
+Responsibilities:
+    - Consolidate all analysis results
+    - Write a structured Markdown analysis report
+    - Reference visualization charts in the report
+    - Save the final report to a file
 
-工具集：
-    - write_text_file（创建/覆盖 Markdown 文件）
-    - insert_text_file（在指定位置插入内容）
-    - view_text_file（查看文件内容）
+Toolkit:
+    - `write_text_file` to create or overwrite Markdown files
+    - `insert_text_file` to insert content at a specific position
+    - `view_text_file` to inspect file contents
 """
 
 import os
@@ -28,9 +28,9 @@ from agentscope.tool import (
     view_text_file,
 )
 
-# 导入 prompt
+# Import prompt
 from agents.prompts import REPORT_WRITER_PROMPT
-# 导入上下文和事件总线
+# Import context and event bus
 from agents.context import get_event_bus, register_streaming_hook
 from agents.result_utils import extract_agent_result_text
 from agents.event_bus import (
@@ -47,20 +47,20 @@ async def create_report_writer_worker(
     agent_name: str = "ReportWriter",
 ) -> ToolResponse:
     """
-    创建报告写作者 Worker
-    
+    Create the report writer worker.
+
     Args:
-        task_description: 任务描述
-        all_results: 所有 Worker 的结果汇总
-        
+        task_description: Task description.
+        all_results: Aggregated results from all workers.
+
     Returns:
-        ToolResponse: 包含报告路径
+        ToolResponse: The generated report content or report path.
     """
     
-    # 从上下文获取事件总线
+    # Get the event bus from the shared context.
     event_bus = get_event_bus()
     
-    # 发送开始事件
+    # Publish the start event.
     if event_bus:
         await event_bus.publish(await create_agent_start_event(
             agent_name,
@@ -70,27 +70,27 @@ async def create_report_writer_worker(
     try:
         toolkit = Toolkit()
         
-        # 注册文本文件编辑工具
+        # Register text-editing tools.
         toolkit.register_tool_function(write_text_file)
         toolkit.register_tool_function(insert_text_file)
         toolkit.register_tool_function(view_text_file)
         
-        # 构建完整的任务描述
+        # Build the full task description.
         full_task = task_description
         if all_results:
-            full_task = f"""整合以下所有分析结果，撰写一份完整的数据分析报告：
+            full_task = f"""Consolidate the following analysis results and write a complete data analysis report:
 
 {all_results}
 
-报告要求：
+Report requirements:
 {task_description}
 
-重要提示：
-- 使用 write_text_file 工具创建 Markdown 报告
-- 报告保存路径：output/reports/data_analysis_report.md
-- 如果有图表路径，使用 Markdown 语法引用图片：![图表说明](../charts/图表文件名.png)
+Important notes:
+- Use the `write_text_file` tool to create the Markdown report
+- Save the report to: output/reports/data_analysis_report.md
+- If chart paths are available, embed them with Markdown syntax such as ![Chart description](../charts/chart_file_name.png)
 """
-        # 确保输出目录存在
+        # Ensure the output directory exists.
         os.makedirs("output/reports", exist_ok=True)
         
         worker = ReActAgent(
@@ -101,10 +101,10 @@ async def create_report_writer_worker(
         toolkit=toolkit,            memory=InMemoryMemory(),
         )
         
-        # ====== 注册流式输出钩子 ======
+        # Register the streaming output hook.
         register_streaming_hook(worker, agent_name)
         
-        print(f"\n📝 [ReportWriterWorker] 开始撰写报告：{task_description}")
+        print(f"\n📝 [ReportWriterWorker] Starting report writing: {task_description}")
         result = await worker(Msg("user", full_task, "user"))
         
         content = extract_agent_result_text(result).strip()
@@ -117,7 +117,7 @@ async def create_report_writer_worker(
                 pass
 
         if not content and all_results:
-            content = "# \u8bad\u7ec3\u6570\u636e\u5ba1\u8ba1\u62a5\u544a" + chr(10) + chr(10) + all_results.strip()
+            content = "# Data Analysis Report" + chr(10) + chr(10) + all_results.strip()
 
         print("[ReportWriterWorker] report completed")
         if event_bus:
@@ -129,7 +129,7 @@ async def create_report_writer_worker(
         from agentscope.message import TextBlock
         return ToolResponse(content=[TextBlock(type="text", text=content)])
     except Exception as e:
-        # 发送错误事件
+        # Publish the error event.
         if event_bus:
             await event_bus.publish(await create_agent_error_event(
                 agent_name,

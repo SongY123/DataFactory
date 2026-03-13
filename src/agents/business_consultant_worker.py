@@ -1,15 +1,15 @@
 """
-BusinessConsultantWorker - 业务顾问 Agent
-==========================================
+BusinessConsultantWorker - Business consultant agent
+===================================================
 
-职责：
-    - 解读数据分析结果
-    - 提供业务洞察
-    - 识别机会和风险
-    - 给出业务建议
+Responsibilities:
+    - Interpret data analysis results
+    - Provide business insights
+    - Identify opportunities and risks
+    - Recommend business actions
 
-工具集：
-    - 无（纯 LLM 推理，不需要工具）
+Toolkit:
+    - None (pure LLM reasoning, no tools required)
 """
 
 from typing import Optional
@@ -19,9 +19,9 @@ from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg
 from agentscope.tool import Toolkit, ToolResponse
 
-# 导入 prompt
+# Import prompt
 from agents.prompts import BUSINESS_CONSULTANT_PROMPT
-# 导入上下文和事件总线
+# Import context and event bus
 from agents.context import get_event_bus, register_streaming_hook
 from agents.result_utils import extract_agent_result_text
 from agents.event_bus import (
@@ -38,20 +38,20 @@ async def create_business_consultant_worker(
     agent_name: str = "BusinessConsultant",
 ) -> ToolResponse:
     """
-    创建业务顾问 Worker
-    
+    Create the business consultant worker.
+
     Args:
-        task_description: 任务描述
-        analysis_data: 数据分析结果（可选，如果有则基于此提供洞察）
-        
+        task_description: Task description.
+        analysis_data: Data analysis results. If provided, insights should be based on it.
+
     Returns:
-        ToolResponse: 包含业务洞察
+        ToolResponse: Business insights.
     """
     
-    # 从上下文获取事件总线
+    # Get the event bus from the shared context.
     event_bus = get_event_bus()
     
-    # 发送开始事件
+    # Publish the start event.
     if event_bus:
         await event_bus.publish(await create_agent_start_event(
             agent_name,
@@ -59,18 +59,18 @@ async def create_business_consultant_worker(
         ))
     
     try:
-        # 业务顾问不需要任何工具，完全依靠 LLM 的推理能力
+        # This worker relies entirely on LLM reasoning and does not need tools.
         toolkit = Toolkit()
         
-        # 构建完整的任务描述
+        # Build the full task description.
         full_task = task_description
         if analysis_data:
-            full_task = f"""基于以下数据分析结果，提供业务洞察：
+            full_task = f"""Provide business insights based on the following data analysis results:
 
-数据分析结果：
+Data analysis results:
 {analysis_data}
 
-任务要求：
+Task requirements:
 {task_description}
 """
         
@@ -82,15 +82,15 @@ async def create_business_consultant_worker(
         toolkit=toolkit,            memory=InMemoryMemory(),
         )
         
-        # ====== 注册流式输出钩子 ======
+        # Register the streaming output hook.
         register_streaming_hook(worker, agent_name)
         
-        print(f"\n💼 [BusinessConsultantWorker] 开始解读数据：{task_description}")
+        print(f"\n💼 [BusinessConsultantWorker] Starting insight generation: {task_description}")
         result = await worker(Msg("user", full_task, "user"))
         
         content = extract_agent_result_text(result)
         
-        print(f"✅ [BusinessConsultantWorker] 洞察完成\n")
+        print(f"✅ [BusinessConsultantWorker] Insight generation completed\n")
         if event_bus:
             await event_bus.publish(await create_agent_finish_event(
                 agent_name,
@@ -100,7 +100,7 @@ async def create_business_consultant_worker(
         from agentscope.message import TextBlock
         return ToolResponse(content=[TextBlock(type="text", text=content)])
     except Exception as e:
-        # 发送错误事件
+        # Publish the error event.
         if event_bus:
             await event_bus.publish(await create_agent_error_event(
                 agent_name,
