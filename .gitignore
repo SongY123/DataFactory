@@ -12,6 +12,7 @@ logs/
 tmp/
 
 outputs/
+.idea
 
 uploads/
 
