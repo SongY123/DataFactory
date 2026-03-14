@@ -7,10 +7,10 @@ from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 from utils.config_loader import ConfigLoader, get_config
-from web.api import agentic_synthesis_router, auth_router, user_router
 from web.db_migration_runner import SqlMigrationRunner
 from web.entity.model import get_engine, init_engine
 
@@ -31,7 +31,7 @@ def _load_runtime_config(config_path: str | Path) -> None:
 _load_runtime_config(DEFAULT_WEB_CONFIG_PATH)
 
 from utils.logger import logger
-from web.api import agent_router, auth_router, dataset_router, user_router
+from web.api import agent_router, agentic_synthesis_router, auth_router, chat_router, dataset_router, user_router
 
 
 def _resolve_path(path_str: Optional[str]) -> Optional[Path]:
@@ -67,6 +67,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+GENERATED_OUTPUT_DIR = PROJECT_ROOT / 'src' / 'web' / 'output'
+GENERATED_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -79,7 +82,9 @@ app.include_router(user_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(dataset_router, prefix="/api")
 app.include_router(agent_router, prefix="/api")
+app.include_router(chat_router, prefix="/api")
 app.include_router(agentic_synthesis_router, prefix="/api")
+app.mount('/api/generated', StaticFiles(directory=str(GENERATED_OUTPUT_DIR)), name='generated-output')
 
 
 @app.get("/health")

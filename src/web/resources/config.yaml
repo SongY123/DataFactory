@@ -7,7 +7,6 @@ database:
   db_path: "datafactory.db"
 
 auth:
-  # If true, guarded APIs can be accessed without login and will auto-use admin/admin.
   auto_login_as_admin: false
 
 logging:
@@ -18,6 +17,24 @@ logging:
   format: "%(asctime)s - %(name)s - %(pathname)s:%(lineno)d - %(levelname)s - %(message)s"
   console: true
 
+workspace:
+  base_path: "workspace"
+
+model:
+  provider: "ollama"
+  ollama:
+    model_name: "qwen3-coder:30b-a3b-fp16"
+    host: "10.132.80.119:11434"
+    stream: true
+    keep_alive: "5m"
+    enable_thinking: false  # 启用 Qwen3 的 thinking 功能
+  dashscope:
+    model_name: "qwen-max"
+    api_key: ""
+    stream: true
+    enable_thinking: false
+    base_url: null
+
 agent:
   models:
     - gpt-4o-mini
@@ -25,7 +42,15 @@ agent:
     - deepseek-chat
     - qwen-max
   llm:
-    # Optional OpenAI-compatible endpoint. Leave blank to use built-in local fallback report generation.
     endpoint: ""
     api_key: ""
     timeout_seconds: 60
+  file:
+    max_parse_seconds: 25
+    max_text_chars: 12000
+    sample_rows: 6
+    pdf_max_pages: 20
+    docx_max_paragraphs: 120
+    docx_max_tables: 12
+    xlsx_max_sheets: 12
+

@@ -8,7 +8,14 @@ from ..service import AgentReportService
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-_agent_service = AgentReportService()
+_agent_service: AgentReportService | None = None
+
+
+def _get_agent_service() -> AgentReportService:
+    global _agent_service
+    if _agent_service is None:
+        _agent_service = AgentReportService()
+    return _agent_service
 
 
 def _ok(data=None, message: str = "ok"):
@@ -22,7 +29,7 @@ def _ok(data=None, message: str = "ok"):
 @router.get("/models")
 def list_models():
     try:
-        return _ok(data={"models": _agent_service.list_models()}, message="agent models fetched")
+        return _ok(data={"models": _get_agent_service().list_models()}, message="agent models fetched")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -38,7 +45,7 @@ async def generate_report(
     llm_model_name: str = Form(default=""),
 ):
     try:
-        data = await _agent_service.analyze_upload(
+        data = await _get_agent_service().analyze_upload(
             file=file,
             model=model,
             prompt=prompt,
@@ -55,7 +62,7 @@ async def generate_report(
 @router.post("/report/revise")
 def revise_report(body: AgentReviseRequest):
     try:
-        data = _agent_service.revise_report(
+        data = _get_agent_service().revise_report(
             session_id=body.session_id,
             prompt=body.prompt,
             model=body.model,
@@ -72,7 +79,7 @@ def revise_report(body: AgentReviseRequest):
 @router.post("/chat")
 def chat(body: AgentChatRequest):
     try:
-        data = _agent_service.chat(
+        data = _get_agent_service().chat(
             message=body.message,
             model=body.model,
             session_id=body.session_id,
