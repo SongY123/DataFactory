@@ -30,6 +30,7 @@ class AgenticSynthesisResult(Base):
     evaluation_json = Column(Text, nullable=False, default="{}", server_default=text("'{}'"))
     status = Column(String(16), nullable=False, default="completed", server_default=text("'completed'"), index=True)
     error_message = Column(Text, nullable=True, default=None)
+    model_output_audit = Column(Text, nullable=True, default=None)
     insert_time = Column(DateTime, nullable=False, default=_utc_now, server_default=text("CURRENT_TIMESTAMP"))
     update_time = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now, server_default=text("CURRENT_TIMESTAMP"))
 
@@ -67,6 +68,7 @@ class AgenticSynthesisResult(Base):
             "evaluation": evaluation,
             "status": self.status,
             "error_message": self.error_message,
+            "model_output_audit": self.model_output_audit,
             "insert_time": self.insert_time.isoformat() if self.insert_time else None,
             "update_time": self.update_time.isoformat() if self.update_time else None,
         }

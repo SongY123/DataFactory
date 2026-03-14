@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS agentic_synthesis_results (
     evaluation_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'failed')),
     error_message TEXT NULL,
+    model_output_audit TEXT NULL,
     insert_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (task_id) REFERENCES agentic_synthesis_tasks (id),
