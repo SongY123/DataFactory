@@ -18,11 +18,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib import request as urllib_request
 from urllib.error import URLError
 
-from pypdf import PdfReader
-
 from ..dao import AgenticSynthesisResultDAO, AgenticSynthesisTaskDAO
 from ..dao.dataset_dao import DatasetDAO
 from utils.logger import logger
+from utils.pdf_support import get_pdf_reader
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -529,6 +528,7 @@ class AgenticSynthesisService:
 
     @staticmethod
     def _inspect_pdf(path: Path) -> Dict[str, Any]:
+        PdfReader = get_pdf_reader()
         reader = PdfReader(str(path))
         page_count = len(reader.pages)
         snippets: List[str] = []

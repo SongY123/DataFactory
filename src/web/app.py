@@ -27,7 +27,6 @@ def _load_runtime_config(config_path: str | Path) -> None:
     CURRENT_WEB_CONFIG_PATH = path
     ConfigLoader.load_config(str(path))
 
-
 _load_runtime_config(DEFAULT_WEB_CONFIG_PATH)
 
 from utils.logger import logger
@@ -94,15 +93,15 @@ def health():
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run DataFactory FastAPI server")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=str(DEFAULT_WEB_CONFIG_PATH),
-        help="Path to web config yaml.",
-    )
+    # parser.add_argument(
+    #     "--config",
+    #     type=str,
+    #     default=str(DEFAULT_WEB_CONFIG_PATH),
+    #     help="Path to web config yaml.",
+    # )
     args = parser.parse_args()
 
-    _load_runtime_config(args.config)
+    # _load_runtime_config(args.config)
 
     host = str(get_config("server.host", "127.0.0.1"))
     port = int(get_config("server.port", 8888))

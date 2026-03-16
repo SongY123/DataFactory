@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover
 
 from utils.config_loader import get_config
 from utils.logger import logger
+from utils.pdf_support import get_pdf_reader
 
 
 class FileParseError(ValueError):
@@ -206,7 +207,7 @@ class AgentFileParser:
 
     def _parse_pdf(self, *, file_name: str, mime_type: str, raw: bytes) -> ParsedFileContent:
         try:
-            from pypdf import PdfReader
+            PdfReader = get_pdf_reader()
         except Exception as exc:
             logger.warning("PDF dependency missing: %s", exc)
             raise FileParseError("PDF parser is unavailable on server. Please contact administrator.") from exc
@@ -251,7 +252,7 @@ class AgentFileParser:
             from docx import Document
         except Exception as exc:
             logger.warning("DOCX dependency missing: %s", exc)
-            raise FileParseError("DOCX parser is unavailable on server. Please contact administrator.") from exc
+            raise FileParseError("DOCX parser is unavailable on server. Install the maintained package `python-docx`.") from exc
 
         try:
             document = Document(io.BytesIO(raw))
@@ -412,5 +413,3 @@ class AgentFileParser:
 
         logger.info("Unsupported upload type: file=%s mime=%s", safe_name, mime_type)
         raise FileParseError("Unsupported file type. Supported: .txt/.md/.csv/.json/.jsonl/.pdf/.docx/.xlsx/.xlsm")
-
-
