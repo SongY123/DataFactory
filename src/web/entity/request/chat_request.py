@@ -2,10 +2,12 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChatModelConfig(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     name: str | None = Field(default=None, max_length=128, description="Display name for the selected model config")
     mode: Literal["local", "api"] | None = Field(default=None, description="UI-level config mode")
     provider: Literal["ollama", "openai", "dashscope"] | None = Field(default=None, description="Model provider override")
