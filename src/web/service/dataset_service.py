@@ -79,18 +79,39 @@ class DatasetService:
 
     def _resolve_dataset_file_path(self, row: Dict) -> Optional[Path]:
         raw_path = row.get("file_path")
+        file_name = Path(str(row.get("file_name") or "")).name
+
         if raw_path:
             path = Path(raw_path)
             if path.is_file():
                 return path
+            if path.is_dir():
+                try:
+                    if file_name:
+                        candidates = sorted(
+                            [candidate for candidate in path.rglob(file_name) if candidate.is_file()],
+                            key=lambda candidate: candidate.stat().st_mtime,
+                            reverse=True,
+                        )
+                        if candidates:
+                            return candidates[0]
 
-        file_name = Path(str(row.get("file_name") or "")).name
+                    candidates = sorted(
+                        [candidate for candidate in path.rglob("*") if candidate.is_file()],
+                        key=lambda candidate: candidate.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if candidates:
+                        return candidates[0]
+                except OSError:
+                    return None
+
         if not file_name:
             return None
 
         try:
             candidates = sorted(
-                self.upload_dir.glob(f"*_{file_name}"),
+                [candidate for candidate in self.upload_dir.rglob(file_name) if candidate.is_file()],
                 key=lambda candidate: candidate.stat().st_mtime,
                 reverse=True,
             )
@@ -272,24 +293,22 @@ class DatasetService:
         if not upload_list:
             raise ValueError("file is required")
 
-        first_name = upload_list[0].filename or "dataset"
-        first_bytes = await upload_list[0].read()
-        samples = self._parse_samples(first_name, first_bytes)
-
+        upload_entries: List[tuple[str, bytes]] = []
         total_size = 0
-        first_file_path: Optional[str] = None
+        samples: List[Dict] = []
+        first_name = upload_list[0].filename or "dataset"
         for idx, up in enumerate(upload_list):
-            if idx == 0:
-                content = first_bytes
-            else:
-                content = await up.read()
-            contents.append(content)
+            raw_name = up.filename or f"file-{idx}"
+            content = await up.read()
+            upload_entries.append((raw_name, content))
             total_size += len(content)
-            saved_path = self._save_upload_bytes(up.filename or f"file-{idx}", content)
-            if idx == 0:
-                first_file_path = saved_path
-
-        cover_path = await self._save_cover(cover)
+            if not samples:
+                try:
+                    parsed_samples = self._parse_samples(raw_name, content)
+                except Exception:
+                    parsed_samples = []
+                if parsed_samples:
+                    samples = parsed_samples
 
         created = self.dataset_dao.insert_dataset(
             {
@@ -302,36 +321,41 @@ class DatasetService:
                 "status": "uploaded",
                 "note": self._normalize_text(note),
                 "file_name": Path(first_name).name,
-                "file_path": first_file_path,
-                "cover_path": cover_path,
+                "file_path": None,
+                "cover_path": None,
                 "sample_data": json.dumps(samples, ensure_ascii=False),
             }
         )
         dataset_id = int(created.id)
         dataset_root = self.upload_dir / str(int(user_id)) / str(int(dataset_id))
         seen_relative_paths = set()
-        for idx, up in enumerate(upload_list):
-            normalized_relative = str(self._normalize_relative_upload_path(up.filename or f"file-{idx}")).replace("\\", "/")
-            if normalized_relative in seen_relative_paths:
-                continue
-            seen_relative_paths.add(normalized_relative)
 
-            saved = self._save_upload_bytes(
-                user_id=user_id,
+        try:
+            for idx, (raw_name, content) in enumerate(upload_entries):
+                normalized_relative = str(self._normalize_relative_upload_path(raw_name)).replace("\\", "/")
+                if normalized_relative in seen_relative_paths:
+                    continue
+                seen_relative_paths.add(normalized_relative)
+                self._save_upload_bytes(
+                    user_id=user_id,
+                    dataset_id=dataset_id,
+                    filename=raw_name or f"file-{idx}",
+                    content=content,
+                )
+
+            cover_path = await self._save_cover(user_id=user_id, dataset_id=dataset_id, cover=cover)
+            updated = self.dataset_dao.update_dataset(
                 dataset_id=dataset_id,
-                filename=up.filename or f"file-{idx}",
-                content=contents[idx],
+                payload={
+                    "file_path": str(dataset_root.resolve()),
+                    "cover_path": cover_path,
+                },
+                user_id=user_id,
             )
-
-        cover_path = await self._save_cover(user_id=user_id, dataset_id=dataset_id, cover=cover)
-        updated = self.dataset_dao.update_dataset(
-            dataset_id=dataset_id,
-            payload={
-                "file_path": str(dataset_root.resolve()),
-                "cover_path": cover_path,
-            },
-            user_id=user_id,
-        )
-        if updated is None:
-            updated = created
-        return self._to_payload(updated.to_dict(include_internal=True))
+            if updated is None:
+                updated = created
+            return self._to_payload(updated.to_dict(include_internal=True))
+        except Exception:
+            self._safe_unlink(str(dataset_root.resolve()) if dataset_root.exists() else None)
+            self.dataset_dao.delete_dataset(dataset_id=dataset_id, user_id=user_id)
+            raise
