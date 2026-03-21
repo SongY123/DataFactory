@@ -25,6 +25,8 @@ class AgenticSynthesisTask(Base):
     llm_api_key = Column(Text, nullable=False)
     llm_base_url = Column(Text, nullable=False)
     llm_model_name = Column(String(128), nullable=False)
+    parallelism = Column(Integer, nullable=False, default=1, server_default=text("1"))
+    llm_params_json = Column(Text, nullable=True)
     output_file_path = Column(Text, nullable=False)
     generated_dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)
     total_workspaces = Column(Integer, nullable=False, default=0, server_default=text("0"))
@@ -65,6 +67,7 @@ class AgenticSynthesisTask(Base):
 
     def to_dict(self) -> Dict:
         action_tags = self._safe_json_list(self.action_tags_json)
+        llm_params = self._safe_json_dict(self.llm_params_json)
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -74,6 +77,9 @@ class AgenticSynthesisTask(Base):
             "llm_api_key": self.llm_api_key,
             "llm_base_url": self.llm_base_url,
             "llm_model_name": self.llm_model_name,
+            "parallelism": self.parallelism,
+            "llm_params_json": self.llm_params_json,
+            "llm_params": llm_params,
             "output_file_path": self.output_file_path,
             "generated_dataset_id": self.generated_dataset_id,
             "total_workspaces": self.total_workspaces,
@@ -95,6 +101,16 @@ class AgenticSynthesisTask(Base):
         except Exception:
             pass
         return []
+
+    @staticmethod
+    def _safe_json_dict(value: str | None) -> Dict:
+        try:
+            loaded = json.loads(value or "{}")
+            if isinstance(loaded, dict):
+                return loaded
+        except Exception:
+            pass
+        return {}
 
     def _derive_status(self) -> str:
         if self.finished_time and self.error_message:

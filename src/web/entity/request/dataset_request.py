@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 _SUPPORTED_DATASET_TYPES = {"instruction", "conversation", "evaluation", "tool-trace", "trajectory", "reasoning"}
 _SUPPORTED_DATASET_LANGUAGES = {"zh", "en", "multi"}
 _SUPPORTED_DATASET_SOURCE_KINDS = {"upload", "generated", "huggingface"}
+_SUPPORTED_DATASET_SIZE_LEVELS = {"kb", "mb", "gb"}
 
 
 def _normalize_tag_list(value: Any) -> Optional[List[str]]:
@@ -28,6 +29,18 @@ def _normalize_tag_list(value: Any) -> Optional[List[str]]:
         seen.add(normalized)
         result.append(normalized)
     return result
+
+
+def _normalize_keyword(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value or "").strip()
+    return text or None
+
+
+def _normalize_choice_list(value: Any) -> List[str]:
+    normalized = _normalize_tag_list(value)
+    return normalized or []
 
 
 class DatasetCreateRequest(BaseModel):
@@ -131,3 +144,30 @@ class DatasetSqlQueryRequest(BaseModel):
     path: Optional[str] = Field(default=None, max_length=1024)
     sql: str = Field(..., min_length=1, max_length=8000)
     limit: int = Field(default=100, ge=1, le=500)
+
+
+class DatasetQueryRequest(BaseModel):
+    name_keyword: Optional[str] = Field(default=None, max_length=256)
+    format_tags: List[str] = Field(default_factory=list)
+    language_tags: List[str] = Field(default_factory=list)
+    size_levels: List[str] = Field(default_factory=list)
+    statuses: List[str] = Field(default_factory=list)
+
+    @field_validator("name_keyword", mode="before")
+    @classmethod
+    def _validate_name_keyword(cls, value: Any) -> Optional[str]:
+        return _normalize_keyword(value)
+
+    @field_validator("format_tags", "language_tags", "statuses", mode="before")
+    @classmethod
+    def _validate_choice_lists(cls, value: Any) -> List[str]:
+        return _normalize_choice_list(value)
+
+    @field_validator("size_levels", mode="before")
+    @classmethod
+    def _validate_size_levels(cls, value: Any) -> List[str]:
+        values = _normalize_choice_list(value)
+        invalid = [item for item in values if item not in _SUPPORTED_DATASET_SIZE_LEVELS]
+        if invalid:
+            raise ValueError("size_levels must only contain: kb, mb, gb")
+        return values

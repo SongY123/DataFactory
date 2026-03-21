@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +23,11 @@ from .dataset_service import DatasetService
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MAX_SOURCE_ITEMS = 200
 MAX_TEXT_CHARS = 4000
+DEFAULT_REASONING_PROMPT = (
+    "Generate one training record for reasoning synthesis. "
+    "The reasoning field must always be wrapped in exactly one pair of <think></think> tags. "
+    "Do not add markdown fences."
+)
 
 
 class ReasoningDistillationService(AgenticSynthesisService):
@@ -50,6 +56,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
         source_type: str,
         source_dataset_id: Optional[int],
         source_task_id: Optional[int],
+        prompt: Optional[str],
         strategy: str,
         target_max_tokens: int,
         compression_ratio: float,
@@ -58,6 +65,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
         llm_api_key: str,
         llm_base_url: str,
         llm_model_name: str,
+        parallelism: int = 1,
+        llm_params_json: Optional[str] = None,
     ) -> Dict:
         source_context = self._build_source_context(
             user_id=user_id,
@@ -68,6 +77,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
         source_items = source_context["items"]
         if not source_items:
             raise ValueError("no source items available for distillation")
+        llm_params = self._parse_llm_params_json(llm_params_json)
+        normalized_parallelism = self._normalize_parallelism(parallelism, len(source_items))
 
         task = self.distillation_task_dao.insert_task(
             {
@@ -75,6 +86,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "source_type": source_type,
                 "source_dataset_id": int(source_dataset_id) if source_dataset_id else None,
                 "source_task_id": int(source_task_id) if source_task_id else None,
+                "prompt_text": str(prompt or "").strip() or DEFAULT_REASONING_PROMPT,
                 "strategy": str(strategy).strip(),
                 "target_max_tokens": int(target_max_tokens),
                 "compression_ratio": float(compression_ratio),
@@ -83,6 +95,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "llm_api_key": str(llm_api_key or "").strip(),
                 "llm_base_url": str(llm_base_url or "").strip(),
                 "llm_model_name": str(llm_model_name or "").strip(),
+                "parallelism": normalized_parallelism,
+                "llm_params_json": json.dumps(llm_params, ensure_ascii=False) if llm_params else None,
                 "output_file_path": str(self._resolve_task_output_path(user_id=user_id, task_id=0)),
                 "generated_dataset_id": None,
                 "total_items": len(source_items),
@@ -101,6 +115,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 int(task.id),
                 int(user_id),
                 source_context,
+                str(prompt or "").strip() or DEFAULT_REASONING_PROMPT,
                 str(strategy).strip(),
                 int(target_max_tokens),
                 float(compression_ratio),
@@ -109,6 +124,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 str(llm_api_key or "").strip(),
                 str(llm_base_url or "").strip(),
                 str(llm_model_name or "").strip(),
+                normalized_parallelism,
+                llm_params,
                 output_path,
             ),
             daemon=True,
@@ -146,6 +163,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
         task_id: int,
         user_id: int,
         source_context: Dict[str, Any],
+        prompt: str,
         strategy: str,
         target_max_tokens: int,
         compression_ratio: float,
@@ -154,6 +172,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
         llm_api_key: str,
         llm_base_url: str,
         llm_model_name: str,
+        parallelism: int,
+        llm_params: Dict[str, Any],
         output_path: Path,
     ) -> None:
         source_items = source_context["items"]
@@ -161,6 +181,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
         distilled_samples = 0
         token_total = 0
         sample_records: List[Dict[str, Any]] = []
+        effective_parallelism = self._normalize_parallelism(parallelism, len(source_items))
 
         dataset_output_path = output_path.with_name("reasoning_dataset.jsonl")
         manifest_path = output_path.with_name("manifest.json")
@@ -169,12 +190,55 @@ class ReasoningDistillationService(AgenticSynthesisService):
             self.distillation_task_dao.mark_started(task_id)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with output_path.open("w", encoding="utf-8") as task_writer, dataset_output_path.open("w", encoding="utf-8") as dataset_writer:
-                for item in source_items:
-                    processed_items += 1
-                    try:
-                        distilled = self._distill_item(
+                if effective_parallelism > 1:
+                    with ThreadPoolExecutor(max_workers=effective_parallelism, thread_name_prefix=f"reasoning-{task_id}") as executor:
+                        futures = [
+                            executor.submit(
+                                self._process_source_item,
+                                task_id=task_id,
+                                user_id=user_id,
+                                source_context=source_context,
+                                source_item=item,
+                                prompt=prompt,
+                                strategy=strategy,
+                                target_max_tokens=target_max_tokens,
+                                compression_ratio=compression_ratio,
+                                keep_tool_trace=keep_tool_trace,
+                                note=note,
+                                llm_api_key=llm_api_key,
+                                llm_base_url=llm_base_url,
+                                llm_model_name=llm_model_name,
+                                llm_params=llm_params,
+                            )
+                            for item in source_items
+                        ]
+                        for future in as_completed(futures):
+                            item_result = future.result()
+                            processed_items, distilled_samples, token_total = self._persist_source_item_result(
+                                task_id=task_id,
+                                processed_items=processed_items,
+                                distilled_samples=distilled_samples,
+                                token_total=token_total,
+                                item_result=item_result,
+                                task_writer=task_writer,
+                                dataset_writer=dataset_writer,
+                                sample_records=sample_records,
+                            )
+                            avg_tokens = int(token_total / distilled_samples) if distilled_samples else 0
+                            self.distillation_task_dao.update_progress(
+                                task_id,
+                                processed_items=processed_items,
+                                distilled_samples=distilled_samples,
+                                avg_tokens=avg_tokens,
+                            )
+                else:
+                    for item in source_items:
+                        item_result = self._process_source_item(
+                            task_id=task_id,
+                            user_id=user_id,
                             source_context=source_context,
                             source_item=item,
+                            prompt=prompt,
                             strategy=strategy,
                             target_max_tokens=target_max_tokens,
                             compression_ratio=compression_ratio,
@@ -183,56 +247,25 @@ class ReasoningDistillationService(AgenticSynthesisService):
                             llm_api_key=llm_api_key,
                             llm_base_url=llm_base_url,
                             llm_model_name=llm_model_name,
+                            llm_params=llm_params,
                         )
-                        token_count = int(distilled.get("token_count") or 0)
-                        token_total += token_count
-                        distilled_samples += 1
-
-                        record_payload = {
-                            "task_id": task_id,
-                            "user_id": user_id,
-                            "source_type": source_context["source_type"],
-                            "source_ref_id": int(source_context["source_ref_id"]),
-                            "item_key": distilled["item_key"],
-                            "prompt_text": distilled["prompt_text"],
-                            "reasoning_text": distilled["reasoning_text"],
-                            "answer_text": distilled["answer_text"],
-                            "record_json": json.dumps(distilled["record"], ensure_ascii=False),
-                            "token_count": token_count,
-                            "status": "completed",
-                            "error_message": None,
-                        }
-                        saved = self.distillation_result_dao.insert_result(record_payload)
-                        task_writer.write(json.dumps({**saved.to_dict(), "status": "completed"}, ensure_ascii=False) + "\n")
-                        dataset_writer.write(json.dumps(distilled["record"], ensure_ascii=False) + "\n")
-                        if len(sample_records) < DatasetService.SAMPLE_PREVIEW_LIMIT:
-                            sample_records.append(distilled["record"])
-                    except Exception as exc:
-                        logger.exception("Reasoning distillation item failed. task_id=%s item=%s", task_id, item.get("item_key"))
-                        failure_payload = {
-                            "task_id": task_id,
-                            "user_id": user_id,
-                            "source_type": source_context["source_type"],
-                            "source_ref_id": int(source_context["source_ref_id"]),
-                            "item_key": str(item.get("item_key") or f"item-{processed_items}"),
-                            "prompt_text": str(item.get("prompt_text") or self._derive_prompt_text(item) or "Distillation source item"),
-                            "reasoning_text": "Distillation failed for this item.",
-                            "answer_text": "",
-                            "record_json": json.dumps({}, ensure_ascii=False),
-                            "token_count": 0,
-                            "status": "failed",
-                            "error_message": str(exc),
-                        }
-                        saved = self.distillation_result_dao.insert_result(failure_payload)
-                        task_writer.write(json.dumps({**saved.to_dict(), "status": "failed"}, ensure_ascii=False) + "\n")
-
-                    avg_tokens = int(token_total / distilled_samples) if distilled_samples else 0
-                    self.distillation_task_dao.update_progress(
-                        task_id,
-                        processed_items=processed_items,
-                        distilled_samples=distilled_samples,
-                        avg_tokens=avg_tokens,
-                    )
+                        processed_items, distilled_samples, token_total = self._persist_source_item_result(
+                            task_id=task_id,
+                            processed_items=processed_items,
+                            distilled_samples=distilled_samples,
+                            token_total=token_total,
+                            item_result=item_result,
+                            task_writer=task_writer,
+                            dataset_writer=dataset_writer,
+                            sample_records=sample_records,
+                        )
+                        avg_tokens = int(token_total / distilled_samples) if distilled_samples else 0
+                        self.distillation_task_dao.update_progress(
+                            task_id,
+                            processed_items=processed_items,
+                            distilled_samples=distilled_samples,
+                            avg_tokens=avg_tokens,
+                        )
 
             avg_tokens = int(token_total / distilled_samples) if distilled_samples else 0
             manifest = {
@@ -299,6 +332,111 @@ class ReasoningDistillationService(AgenticSynthesisService):
         finally:
             with self._distillation_lock:
                 self._distillation_threads.pop(task_id, None)
+
+    def _process_source_item(
+        self,
+        *,
+        task_id: int,
+        user_id: int,
+        source_context: Dict[str, Any],
+        source_item: Dict[str, Any],
+        prompt: str,
+        strategy: str,
+        target_max_tokens: int,
+        compression_ratio: float,
+        keep_tool_trace: bool,
+        note: Optional[str],
+        llm_api_key: str,
+        llm_base_url: str,
+        llm_model_name: str,
+        llm_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        try:
+            distilled = self._distill_item(
+                source_context=source_context,
+                source_item=source_item,
+                prompt=prompt,
+                strategy=strategy,
+                target_max_tokens=target_max_tokens,
+                compression_ratio=compression_ratio,
+                keep_tool_trace=keep_tool_trace,
+                note=note,
+                llm_api_key=llm_api_key,
+                llm_base_url=llm_base_url,
+                llm_model_name=llm_model_name,
+                llm_params=llm_params,
+            )
+            token_count = int(distilled.get("token_count") or 0)
+            return {
+                "status": "completed",
+                "record_payload": {
+                    "task_id": task_id,
+                    "user_id": user_id,
+                    "source_type": source_context["source_type"],
+                    "source_ref_id": int(source_context["source_ref_id"]),
+                    "item_key": distilled["item_key"],
+                    "prompt_text": distilled["prompt_text"],
+                    "reasoning_text": distilled["reasoning_text"],
+                    "answer_text": distilled["answer_text"],
+                    "record_json": json.dumps(distilled["record"], ensure_ascii=False),
+                    "token_count": token_count,
+                    "status": "completed",
+                    "error_message": None,
+                },
+                "dataset_record": distilled["record"],
+                "token_count": token_count,
+            }
+        except Exception as exc:
+            logger.exception("Reasoning distillation item failed. task_id=%s item=%s", task_id, source_item.get("item_key"))
+            return {
+                "status": "failed",
+                "record_payload": {
+                    "task_id": task_id,
+                    "user_id": user_id,
+                    "source_type": source_context["source_type"],
+                    "source_ref_id": int(source_context["source_ref_id"]),
+                    "item_key": str(source_item.get("item_key") or "item"),
+                    "prompt_text": str(source_item.get("prompt_text") or self._derive_prompt_text(source_item) or "Distillation source item"),
+                    "reasoning_text": "Distillation failed for this item.",
+                    "answer_text": "",
+                    "record_json": json.dumps({}, ensure_ascii=False),
+                    "token_count": 0,
+                    "status": "failed",
+                    "error_message": str(exc),
+                },
+                "dataset_record": None,
+                "token_count": 0,
+            }
+
+    def _persist_source_item_result(
+        self,
+        *,
+        task_id: int,
+        processed_items: int,
+        distilled_samples: int,
+        token_total: int,
+        item_result: Dict[str, Any],
+        task_writer,
+        dataset_writer,
+        sample_records: List[Dict[str, Any]],
+    ) -> tuple[int, int, int]:
+        processed_items += 1
+        record_payload = dict(item_result.get("record_payload") or {})
+        saved = self.distillation_result_dao.insert_result(record_payload)
+        status = str(item_result.get("status") or record_payload.get("status") or "unknown")
+        task_writer.write(json.dumps({**saved.to_dict(), "status": status}, ensure_ascii=False) + "\n")
+        task_writer.flush()
+
+        dataset_record = item_result.get("dataset_record")
+        token_total += int(item_result.get("token_count") or 0)
+        if dataset_record:
+            distilled_samples += 1
+            dataset_writer.write(json.dumps(dataset_record, ensure_ascii=False) + "\n")
+            dataset_writer.flush()
+            if len(sample_records) < DatasetService.SAMPLE_PREVIEW_LIMIT:
+                sample_records.append(dataset_record)
+
+        return processed_items, distilled_samples, token_total
 
     def _build_source_context(
         self,
@@ -448,6 +586,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
         *,
         source_context: Dict[str, Any],
         source_item: Dict[str, Any],
+        prompt: str,
         strategy: str,
         target_max_tokens: int,
         compression_ratio: float,
@@ -456,6 +595,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
         llm_api_key: str,
         llm_base_url: str,
         llm_model_name: str,
+        llm_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         base_messages = self._derive_messages(source_context["source_type"], source_item["record"])
         answer_seed = self._derive_answer_text(source_context["source_type"], source_item["record"])
@@ -463,10 +603,11 @@ class ReasoningDistillationService(AgenticSynthesisService):
             "You distill training data for a data-analysis model. "
             "Return exactly one JSON object with keys: messages, reasoning, answer. "
             "messages must be an array of {role, content}. reasoning and answer must be strings. "
-            "Keep reasoning concise but useful for model training. "
+            "Keep reasoning concise but useful for model training, and wrap reasoning in exactly one pair of <think></think> tags. "
             "Do not include markdown fences or extra keys."
         )
         user_payload = {
+            "prompt": str(prompt or "").strip() or DEFAULT_REASONING_PROMPT,
             "source_type": source_context["source_type"],
             "strategy": strategy,
             "target_max_tokens": target_max_tokens,
@@ -485,6 +626,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
             model_name=llm_model_name,
             system_prompt=system_prompt,
             user_payload=user_payload,
+            llm_params=llm_params,
         )
         try:
             payload = self._extract_json_object(content)
@@ -497,6 +639,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
 
         if not reasoning:
             reasoning = self._fallback_reasoning(source_context["source_type"], source_item["record"], keep_tool_trace=keep_tool_trace)
+        reasoning = self._ensure_think_tags(reasoning)
         if not answer:
             answer = answer_seed or self._fallback_answer(source_context["source_type"], source_item["record"])
 
@@ -654,3 +797,12 @@ class ReasoningDistillationService(AgenticSynthesisService):
     def _build_generated_dataset_name(source_context: Dict[str, Any], task_id: int) -> str:
         source_label = str(source_context.get("source_label") or "source").strip()
         return f"{source_label} Reasoning Distilled T{task_id}"
+
+    @staticmethod
+    def _ensure_think_tags(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "<think></think>"
+        if text.startswith("<think>") and text.endswith("</think>"):
+            return text
+        return f"<think>{text}</think>"

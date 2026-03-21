@@ -32,6 +32,8 @@ def start_agentic_synthesis_task(request: Request, body: AgenticSynthesisStartRe
             llm_api_key=body.llm_api_key,
             llm_base_url=body.llm_base_url,
             llm_model_name=body.llm_model_name,
+            parallelism=body.parallelism,
+            llm_params_json=body.llm_params_json,
         )
         return _ok(data=data, message="agentic synthesis task started")
     except Exception as exc:

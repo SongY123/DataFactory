@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from utils.auth_guard import assert_login
 from ..entity.request import (
     DatasetCreateRequest,
+    DatasetQueryRequest,
     DatasetSqlQueryRequest,
     DatasetUpdateRequest,
     HuggingFaceDatasetImportRequest,
@@ -20,12 +21,15 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 _dataset_service = DatasetService()
 
 
-def _ok(data=None, message: str = "ok"):
-    return {
+def _ok(data=None, message: str = "ok", meta=None):
+    payload = {
         "success": True,
         "message": message,
         "data": data,
     }
+    if meta is not None:
+        payload["meta"] = meta
+    return payload
 
 
 @router.get("")
@@ -33,6 +37,25 @@ def list_datasets(request: Request):
     try:
         user_id = assert_login(request)
         return _ok(data=_dataset_service.list_datasets(user_id=user_id), message="datasets fetched")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/search")
+def search_datasets(request: Request, body: DatasetQueryRequest):
+    try:
+        user_id = assert_login(request)
+        result = _dataset_service.search_datasets(user_id=user_id, filters=body.model_dump())
+        return _ok(
+            data=result.get("items", []),
+            message="datasets fetched",
+            meta={
+                "total_count": result.get("total_count", 0),
+                "filtered_count": result.get("filtered_count", 0),
+                "importing_count": result.get("importing_count", 0),
+                "generated_count": result.get("generated_count", 0),
+            },
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

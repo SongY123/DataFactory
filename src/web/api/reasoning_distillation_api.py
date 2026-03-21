@@ -29,6 +29,7 @@ def start_reasoning_distillation_task(request: Request, body: ReasoningDistillat
             source_type=body.source_type,
             source_dataset_id=body.source_dataset_id,
             source_task_id=body.source_task_id,
+            prompt=body.prompt,
             strategy=body.strategy,
             target_max_tokens=body.target_max_tokens,
             compression_ratio=body.compression_ratio,
@@ -37,6 +38,8 @@ def start_reasoning_distillation_task(request: Request, body: ReasoningDistillat
             llm_api_key=body.llm_api_key,
             llm_base_url=body.llm_base_url,
             llm_model_name=body.llm_model_name,
+            parallelism=body.parallelism,
+            llm_params_json=body.llm_params_json,
         )
         return _ok(data=data, message="reasoning distillation task started")
     except Exception as exc:

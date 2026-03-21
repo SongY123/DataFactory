@@ -171,6 +171,11 @@ class DatasetService:
         return text or None
 
     @staticmethod
+    def _normalize_dataset_status(value: Any) -> str:
+        normalized = str(value or "uploaded").strip().lower() or "uploaded"
+        return "uploaded" if normalized == "ready" else normalized
+
+    @staticmethod
     def _to_json_text(value: Any, default: Any) -> str:
         return json.dumps(value if value is not None else default, ensure_ascii=False)
 
@@ -221,6 +226,65 @@ class DatasetService:
     @staticmethod
     def _normalize_tag_list(values: Any) -> List[str]:
         return DatasetService._decode_json_list(values)
+
+    @staticmethod
+    def _size_bucket(size: Any) -> str:
+        value = int(size or 0)
+        if value >= 1024 * 1024 * 1024:
+            return "gb"
+        if value >= 1024 * 1024:
+            return "mb"
+        return "kb"
+
+    @staticmethod
+    def _expand_format_aliases(values: Any) -> set[str]:
+        aliases: set[str] = set()
+        for item in DatasetService._normalize_tag_list(values):
+            aliases.add(item)
+            if item in {"excel", "xlsx", "xls"}:
+                aliases.update({"excel", "xlsx", "xls"})
+        return aliases
+
+    @staticmethod
+    def _is_generated_payload(payload: Dict[str, Any]) -> bool:
+        dataset_type = str(payload.get("type") or "").strip().lower()
+        source_kind = str(payload.get("source_kind") or "").strip().lower()
+        return bool(
+            payload.get("origin_stage")
+            or payload.get("origin_task_id")
+            or payload.get("origin_dataset_id")
+            or source_kind == "generated"
+            or dataset_type in {"trajectory", "reasoning"}
+        )
+
+    def _matches_dataset_query(self, payload: Dict[str, Any], filters: Optional[Dict[str, Any]] = None) -> bool:
+        query = filters or {}
+
+        name_keyword = str(query.get("name_keyword") or "").strip().lower()
+        if name_keyword and name_keyword not in str(payload.get("name") or "").strip().lower():
+            return False
+
+        format_filters = self._expand_format_aliases(query.get("format_tags"))
+        if format_filters:
+            payload_formats = self._expand_format_aliases(payload.get("format_tags"))
+            if payload_formats.isdisjoint(format_filters):
+                return False
+
+        language_filters = set(self._normalize_language_tags(query.get("language_tags"), None))
+        if language_filters:
+            payload_languages = set(self._normalize_language_tags(payload.get("language_tags"), payload.get("language")))
+            if payload_languages.isdisjoint(language_filters):
+                return False
+
+        size_levels = set(self._normalize_tag_list(query.get("size_levels")))
+        if size_levels and self._size_bucket(payload.get("size")) not in size_levels:
+            return False
+
+        status_filters = {self._normalize_dataset_status(item) for item in self._normalize_tag_list(query.get("statuses"))}
+        if status_filters and self._normalize_dataset_status(payload.get("status")) not in status_filters:
+            return False
+
+        return True
 
     @staticmethod
     def _normalize_scalar(value: Any) -> Any:
@@ -634,7 +698,7 @@ class DatasetService:
         }
         all_tags = self._merge_tags(modality_tags, format_tags, language_tags, tag_groups["license"])
         dataset_id = row.get("id")
-        status = str(row.get("status") or "uploaded")
+        status = self._normalize_dataset_status(row.get("status"))
         import_progress = int(row.get("import_progress") or (0 if status == "downloading" else 100))
         import_total_files = int(row.get("import_total_files") or 0)
         import_downloaded_files = int(row.get("import_downloaded_files") or 0)
@@ -773,6 +837,22 @@ class DatasetService:
             normalized_row = self._ensure_dataset_storage_under_project(item.to_dict(include_internal=True))
             payloads.append(self._to_payload(normalized_row))
         return payloads
+
+    def search_datasets(self, user_id: int, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        rows = self.dataset_dao.list_datasets(user_id=user_id)
+        payloads: List[Dict[str, Any]] = []
+        for item in rows:
+            normalized_row = self._ensure_dataset_storage_under_project(item.to_dict(include_internal=True))
+            payloads.append(self._to_payload(normalized_row))
+
+        filtered = [payload for payload in payloads if self._matches_dataset_query(payload, filters)]
+        return {
+            "items": filtered,
+            "total_count": len(payloads),
+            "filtered_count": len(filtered),
+            "importing_count": sum(1 for payload in payloads if self._normalize_dataset_status(payload.get("status")) == "downloading"),
+            "generated_count": sum(1 for payload in payloads if self._is_generated_payload(payload)),
+        }
 
     def get_dataset(self, user_id: int, dataset_id: int) -> Optional[Dict[str, Any]]:
         row = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id, user_id=user_id)

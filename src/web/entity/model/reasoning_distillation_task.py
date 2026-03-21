@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Dict
 
@@ -24,6 +25,7 @@ class ReasoningDistillationTask(Base):
     source_type = Column(String(32), nullable=False)
     source_dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True, index=True)
     source_task_id = Column(Integer, ForeignKey("agentic_synthesis_tasks.id"), nullable=True, index=True)
+    prompt_text = Column(Text, nullable=True)
     strategy = Column(String(64), nullable=False)
     target_max_tokens = Column(Integer, nullable=False, default=1024, server_default=text("1024"))
     compression_ratio = Column(Float, nullable=False, default=0.5, server_default=text("0.5"))
@@ -32,6 +34,8 @@ class ReasoningDistillationTask(Base):
     llm_api_key = Column(Text, nullable=False)
     llm_base_url = Column(Text, nullable=False)
     llm_model_name = Column(String(128), nullable=False)
+    parallelism = Column(Integer, nullable=False, default=1, server_default=text("1"))
+    llm_params_json = Column(Text, nullable=True)
     output_file_path = Column(Text, nullable=False)
     generated_dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)
     total_items = Column(Integer, nullable=False, default=0, server_default=text("0"))
@@ -73,12 +77,14 @@ class ReasoningDistillationTask(Base):
         return normalized
 
     def to_dict(self) -> Dict:
+        llm_params = self._safe_json_dict(self.llm_params_json)
         return {
             "id": self.id,
             "user_id": self.user_id,
             "source_type": self.source_type,
             "source_dataset_id": self.source_dataset_id,
             "source_task_id": self.source_task_id,
+            "prompt_text": self.prompt_text,
             "strategy": self.strategy,
             "target_max_tokens": self.target_max_tokens,
             "compression_ratio": self.compression_ratio,
@@ -87,6 +93,9 @@ class ReasoningDistillationTask(Base):
             "llm_api_key": self.llm_api_key,
             "llm_base_url": self.llm_base_url,
             "llm_model_name": self.llm_model_name,
+            "parallelism": self.parallelism,
+            "llm_params_json": self.llm_params_json,
+            "llm_params": llm_params,
             "output_file_path": self.output_file_path,
             "generated_dataset_id": self.generated_dataset_id,
             "total_items": self.total_items,
@@ -109,3 +118,13 @@ class ReasoningDistillationTask(Base):
         if self.started_time:
             return "running"
         return "pending"
+
+    @staticmethod
+    def _safe_json_dict(value: str | None) -> Dict:
+        try:
+            loaded = json.loads(value or "{}")
+            if isinstance(loaded, dict):
+                return loaded
+        except Exception:
+            pass
+        return {}

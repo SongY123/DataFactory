@@ -4,6 +4,7 @@ from .auth_request import LoginRequest
 from .chat_request import AssetImportRequest, ChatContextItem, ChatRequest
 from .dataset_request import (
     DatasetCreateRequest,
+    DatasetQueryRequest,
     DatasetSqlQueryRequest,
     DatasetUpdateRequest,
     HuggingFaceDatasetImportRequest,
@@ -17,6 +18,7 @@ __all__ = [
     "ChatContextItem",
     "AssetImportRequest",
     "DatasetCreateRequest",
+    "DatasetQueryRequest",
     "DatasetSqlQueryRequest",
     "DatasetUpdateRequest",
     "HuggingFaceDatasetImportRequest",
