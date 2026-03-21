@@ -17,7 +17,7 @@ from utils.auth_guard import get_login_user
 from utils.config_loader import get_config
 from utils.logger import logger
 from utils.model_factory import reset_model_override, set_model_override
-from web.entity.request import ChatRequest
+from web.entity.request import AssetImportRequest, ChatRequest
 from web.service.agent_asset_service import AgentAssetService
 
 router = APIRouter(tags=["agent-interaction"])
@@ -305,6 +305,26 @@ def get_asset_tree(request: Request):
     }
 
 
+@router.post("/assets/import")
+def import_platform_asset(body: AssetImportRequest, request: Request):
+    user = get_login_user(request)
+    try:
+        payload = _asset_service.import_platform_object(
+            int(user["id"]),
+            body.source_type,
+            int(body.source_id),
+            body.target_folder_path,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "item": payload,
+        "message": "platform object imported into assets",
+    }
+
+
 @router.post("/folders")
 def create_folder(body: FolderCreateBody, request: Request):
     user = get_login_user(request)
@@ -383,8 +403,9 @@ async def chat(req: ChatRequest, request: Request):
     user = get_login_user(request)
     user_id = int(user["id"])
     username = str(user.get("username") or "")
+    context_items = [item.model_dump(exclude_none=True) for item in (req.context_items or [])]
 
-    if not _asset_service.has_files(user_id):
+    if not _asset_service.has_files(user_id) and not context_items:
         raise HTTPException(status_code=400, detail="Please upload at least one context file first.")
 
     try:
@@ -396,6 +417,7 @@ async def chat(req: ChatRequest, request: Request):
     workspace_dir = runtime["workspace_dir"]
 
     try:
+        staged_context_items = _asset_service.stage_context_items(user_id, workspace_dir, context_items)
         selected_file_paths = _resolve_selected_file_paths(
             req.selected_file_path,
             req.selected_file_paths,
@@ -458,6 +480,7 @@ async def chat(req: ChatRequest, request: Request):
                     "workspace": workspace_name,
                     "selected_file_path": primary_selected_file_path,
                     "selected_file_paths": selected_file_paths,
+                    "context_items": staged_context_items,
                     "model": selected_model_override,
                 },
             )

@@ -81,6 +81,18 @@ class AgenticSynthesisTaskDAO(BaseDAO):
             session.refresh(task)
             return task
 
+    def update_generated_dataset(self, task_id: int, generated_dataset_id: int) -> Optional[AgenticSynthesisTask]:
+        with self.session_scope() as session:
+            task = session.get(AgenticSynthesisTask, int(task_id))
+            if task is None:
+                return None
+            task.generated_dataset_id = int(generated_dataset_id)
+            task.update_time = datetime.utcnow()
+            session.add(task)
+            session.flush()
+            session.refresh(task)
+            return task
+
     def update_progress(
         self,
         task_id: int,

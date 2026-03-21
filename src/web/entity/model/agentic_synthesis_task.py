@@ -26,6 +26,7 @@ class AgenticSynthesisTask(Base):
     llm_base_url = Column(Text, nullable=False)
     llm_model_name = Column(String(128), nullable=False)
     output_file_path = Column(Text, nullable=False)
+    generated_dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)
     total_workspaces = Column(Integer, nullable=False, default=0, server_default=text("0"))
     processed_workspaces = Column(Integer, nullable=False, default=0, server_default=text("0"))
     started_time = Column(DateTime, nullable=True, default=None)
@@ -74,8 +75,10 @@ class AgenticSynthesisTask(Base):
             "llm_base_url": self.llm_base_url,
             "llm_model_name": self.llm_model_name,
             "output_file_path": self.output_file_path,
+            "generated_dataset_id": self.generated_dataset_id,
             "total_workspaces": self.total_workspaces,
             "processed_workspaces": self.processed_workspaces,
+            "status": self._derive_status(),
             "started_time": self.started_time.isoformat() if self.started_time else None,
             "finished_time": self.finished_time.isoformat() if self.finished_time else None,
             "error_message": self.error_message,
@@ -93,3 +96,11 @@ class AgenticSynthesisTask(Base):
             pass
         return []
 
+    def _derive_status(self) -> str:
+        if self.finished_time and self.error_message:
+            return "failed"
+        if self.finished_time:
+            return "completed"
+        if self.started_time:
+            return "running"
+        return "pending"

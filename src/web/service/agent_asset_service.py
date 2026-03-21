@@ -9,6 +9,8 @@ from typing import Any, Dict
 from fastapi import UploadFile
 
 from utils.config_loader import get_config
+from web.dao import DatasetDAO, ReasoningDistillationTaskDAO
+from web.dao.agentic_synthesis_task_dao import AgenticSynthesisTaskDAO
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -19,6 +21,16 @@ _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
 class AgentAssetService:
+    def __init__(
+        self,
+        dataset_dao: DatasetDAO | None = None,
+        agentic_task_dao: AgenticSynthesisTaskDAO | None = None,
+        distillation_task_dao: ReasoningDistillationTaskDAO | None = None,
+    ) -> None:
+        self.dataset_dao = dataset_dao or DatasetDAO()
+        self.agentic_task_dao = agentic_task_dao or AgenticSynthesisTaskDAO()
+        self.distillation_task_dao = distillation_task_dao or ReasoningDistillationTaskDAO()
+
     def _workspace_base(self) -> Path:
         configured = str(get_config("workspace.base_path", "workspace") or "workspace").strip()
         base = Path(configured)
@@ -294,3 +306,151 @@ class AgentAssetService:
             "runtime_root": runtime_root,
         }
 
+    @staticmethod
+    def _sanitize_copy_name(value: str | None, fallback: str) -> str:
+        raw = str(value or "").strip().replace("\\", "/")
+        candidate = Path(raw).name or fallback
+        candidate = re.sub(r"[^A-Za-z0-9._-]+", "_", candidate).strip("._")
+        return candidate or fallback
+
+    @staticmethod
+    def _copy_path(source: Path, target_dir: Path, target_name: str | None = None) -> Path:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        name = target_name or source.name
+        target = target_dir / name
+        if source.is_dir():
+            shutil.copytree(source, target, dirs_exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        return target
+
+    def _resolve_dataset_source(self, user_id: int, dataset_id: int) -> Dict[str, Any]:
+        dataset = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id, user_id=user_id)
+        if dataset is None:
+            raise ValueError("Dataset not found.")
+        path = Path(str(dataset.file_path or "").strip())
+        if not path.exists():
+            raise ValueError("Dataset file path does not exist.")
+        return {
+            "source_type": "dataset",
+            "source_id": int(dataset.id),
+            "label": str(dataset.name),
+            "path": path,
+        }
+
+    def _resolve_agentic_task_source(self, user_id: int, task_id: int) -> Dict[str, Any]:
+        task = self.agentic_task_dao.get_task_by_id(task_id=task_id, user_id=user_id)
+        if task is None:
+            raise ValueError("Trajectory task not found.")
+        if task.generated_dataset_id:
+            dataset_payload = self._resolve_dataset_source(user_id=user_id, dataset_id=int(task.generated_dataset_id))
+            dataset_payload["source_type"] = "trajectory_task"
+            dataset_payload["source_id"] = int(task.id)
+            dataset_payload["label"] = f"trajectory_task_{task.id}"
+            return dataset_payload
+        path = Path(str(task.output_file_path or "").strip())
+        if not path.exists():
+            raise ValueError("Trajectory task output does not exist.")
+        resolved = path.parent if path.is_file() else path
+        return {
+            "source_type": "trajectory_task",
+            "source_id": int(task.id),
+            "label": f"trajectory_task_{task.id}",
+            "path": resolved,
+        }
+
+    def _resolve_distillation_task_source(self, user_id: int, task_id: int) -> Dict[str, Any]:
+        task = self.distillation_task_dao.get_task_by_id(task_id=task_id, user_id=user_id)
+        if task is None:
+            raise ValueError("Distillation task not found.")
+        if task.generated_dataset_id:
+            dataset_payload = self._resolve_dataset_source(user_id=user_id, dataset_id=int(task.generated_dataset_id))
+            dataset_payload["source_type"] = "distillation_task"
+            dataset_payload["source_id"] = int(task.id)
+            dataset_payload["label"] = f"distillation_task_{task.id}"
+            return dataset_payload
+        path = Path(str(task.output_file_path or "").strip())
+        if not path.exists():
+            raise ValueError("Distillation task output does not exist.")
+        resolved = path.parent if path.is_file() else path
+        return {
+            "source_type": "distillation_task",
+            "source_id": int(task.id),
+            "label": f"distillation_task_{task.id}",
+            "path": resolved,
+        }
+
+    def resolve_platform_source(self, user_id: int, source_type: str, source_id: int) -> Dict[str, Any]:
+        normalized = str(source_type or "").strip().lower()
+        if normalized == "dataset":
+            return self._resolve_dataset_source(user_id=user_id, dataset_id=int(source_id))
+        if normalized == "trajectory_task":
+            return self._resolve_agentic_task_source(user_id=user_id, task_id=int(source_id))
+        if normalized == "distillation_task":
+            return self._resolve_distillation_task_source(user_id=user_id, task_id=int(source_id))
+        raise ValueError(f"Unsupported source_type: {source_type}")
+
+    def import_platform_object(
+        self,
+        user_id: int,
+        source_type: str,
+        source_id: int,
+        target_folder_path: str | None = "",
+    ) -> Dict[str, Any]:
+        source = self.resolve_platform_source(user_id=user_id, source_type=source_type, source_id=source_id)
+        root = self.asset_root(user_id)
+        normalized_folder = self._normalize_relative_path(target_folder_path, allow_empty=True)
+        target_dir = self._resolve_under(root, normalized_folder)
+        if not target_dir.exists():
+            raise ValueError("Target folder does not exist.")
+        if not target_dir.is_dir():
+            raise ValueError("Target path is not a folder.")
+
+        source_path = source["path"]
+        target_name = self._sanitize_copy_name(source.get("label") or source_path.name, source_path.name)
+        copied = self._copy_path(source_path, target_dir, target_name=target_name)
+        relative = copied.relative_to(root).as_posix()
+        return {
+            "source_type": source["source_type"],
+            "source_id": source["source_id"],
+            "label": source["label"],
+            "path": relative,
+            "type": "folder" if copied.is_dir() else "file",
+            "updated_at": self._iso_from_stat(copied),
+        }
+
+    def stage_context_items(self, user_id: int, runtime_dir: Path, context_items: list[Dict[str, Any]] | None) -> list[Dict[str, Any]]:
+        staged: list[Dict[str, Any]] = []
+        if not context_items:
+            return staged
+
+        attachments_root = runtime_dir / "_attached_context"
+        attachments_root.mkdir(parents=True, exist_ok=True)
+        asset_root = self.asset_root(user_id)
+
+        for index, item in enumerate(context_items, start=1):
+            item_type = str((item or {}).get("type") or "").strip().lower()
+            if item_type == "asset_file":
+                asset_path = self._normalize_relative_path((item or {}).get("path"), allow_empty=False)
+                source = self._resolve_under(asset_root, asset_path)
+                if not source.exists() or not source.is_file():
+                    raise ValueError(f"Asset file does not exist: {asset_path}")
+                target = self._copy_path(source, attachments_root / "asset_files", target_name=source.name)
+                staged.append({"type": item_type, "path": str(target.relative_to(runtime_dir).as_posix()), "name": target.name})
+                continue
+
+            if item_type in {"dataset", "trajectory_task", "distillation_task"}:
+                ref_id = int((item or {}).get("ref_id") or 0)
+                if ref_id <= 0:
+                    raise ValueError(f"ref_id is required for context type: {item_type}")
+                source = self.resolve_platform_source(user_id=user_id, source_type=item_type, source_id=ref_id)
+                source_path = source["path"]
+                target_name = self._sanitize_copy_name(f"{item_type}_{ref_id}_{source_path.name}", f"{item_type}_{ref_id}")
+                target = self._copy_path(source_path, attachments_root / item_type, target_name=target_name)
+                staged.append({"type": item_type, "ref_id": ref_id, "path": str(target.relative_to(runtime_dir).as_posix()), "name": target.name})
+                continue
+
+            raise ValueError(f"Unsupported context item type: {item_type}")
+
+        return staged

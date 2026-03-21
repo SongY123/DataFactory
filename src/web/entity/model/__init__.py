@@ -3,6 +3,8 @@ from .dataset import Dataset
 from .user import User
 from .agentic_synthesis_task import AgenticSynthesisTask
 from .agentic_synthesis_result import AgenticSynthesisResult
+from .reasoning_distillation_task import ReasoningDistillationTask
+from .reasoning_distillation_result import ReasoningDistillationResult
 
 __all__ = [
     "Base",
@@ -10,6 +12,8 @@ __all__ = [
     "Dataset",
     "AgenticSynthesisTask",
     "AgenticSynthesisResult",
+    "ReasoningDistillationTask",
+    "ReasoningDistillationResult",
     "get_database_url",
     "init_engine",
     "get_engine",

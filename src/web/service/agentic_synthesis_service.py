@@ -22,6 +22,7 @@ from ..dao import AgenticSynthesisResultDAO, AgenticSynthesisTaskDAO
 from ..dao.dataset_dao import DatasetDAO
 from utils.logger import logger
 from utils.pdf_support import get_pdf_reader
+from .dataset_service import DatasetService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -69,6 +70,7 @@ class AgenticSynthesisService:
         self.task_dao = task_dao or AgenticSynthesisTaskDAO()
         self.dataset_dao = dataset_dao or DatasetDAO()
         self.result_dao = result_dao or AgenticSynthesisResultDAO()
+        self.dataset_service = DatasetService(dataset_dao=self.dataset_dao)
         self._lock = threading.RLock()
         self._running_threads: Dict[int, threading.Thread] = {}
 
@@ -85,8 +87,10 @@ class AgenticSynthesisService:
         dataset = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id, user_id=user_id)
         if dataset is None:
             raise ValueError("dataset not found for current user")
-        effective_prompt = FIXED_TASK_PROMPT
-        effective_action_tags = list(FIXED_ACTION_TAGS)
+        effective_prompt = str(prompt or "").strip() or FIXED_TASK_PROMPT
+        effective_action_tags = [str(item or "").strip() for item in (action_tags or []) if str(item or "").strip()]
+        if not effective_action_tags:
+            effective_action_tags = list(FIXED_ACTION_TAGS)
         dataset_root = self._resolve_path(str(dataset.file_path or ""))
         workspaces = self._collect_direct_workspaces(dataset_root)
         if not workspaces:
@@ -129,13 +133,13 @@ class AgenticSynthesisService:
             self._running_threads[int(task.id)] = thread
         thread.start()
 
-        return self._sanitize_task_payload(task.to_dict())
+        return self._enrich_task_payload(task.to_dict(), user_id=int(user_id))
 
     def get_task(self, task_id: int, user_id: int) -> Optional[Dict]:
         task = self.task_dao.get_task_by_id(task_id=task_id, user_id=user_id)
         if task is None:
             return None
-        payload = self._sanitize_task_payload(task.to_dict())
+        payload = self._enrich_task_payload(task.to_dict(), user_id=user_id)
         payload["result_count"] = self.result_dao.count_results_by_task(task_id=task_id, user_id=user_id)
         return payload
 
@@ -143,7 +147,7 @@ class AgenticSynthesisService:
         rows = self.task_dao.list_tasks(limit=limit, user_id=user_id)
         result: List[Dict] = []
         for row in rows:
-            payload = self._sanitize_task_payload(row.to_dict())
+            payload = self._enrich_task_payload(row.to_dict(), user_id=user_id)
             payload["result_count"] = self.result_dao.count_results_by_task(task_id=int(row.id), user_id=user_id)
             result.append(payload)
         return result
@@ -175,11 +179,15 @@ class AgenticSynthesisService:
         output_path: Path,
     ) -> None:
         processed_workspaces = 0
+        generated_samples: List[Dict[str, Any]] = []
+        generated_records = 0
 
         try:
             self.task_dao.mark_started(task_id=task_id)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            with output_path.open("w", encoding="utf-8") as writer:
+            dataset_output_path = output_path.with_name("trajectory_dataset.jsonl")
+            manifest_path = output_path.with_name("manifest.json")
+            with output_path.open("w", encoding="utf-8") as writer, dataset_output_path.open("w", encoding="utf-8") as dataset_writer:
                 for workspace in workspaces:
                     tmp_dir = self._prepare_workspace_copy(task_id=task_id, workspace=workspace)
                     try:
@@ -273,6 +281,23 @@ class AgenticSynthesisService:
                             )
                             writer.write(json.dumps(record, ensure_ascii=False) + "\n")
                             writer.flush()
+                            if status == "completed":
+                                dataset_record = {
+                                    "question": question,
+                                    "trajectory": trajectory,
+                                    "evaluation": evaluation,
+                                    "metadata": {
+                                        "task_id": task_id,
+                                        "dataset_id": dataset_id,
+                                        "workspace_name": workspace_name,
+                                        "source_question": question,
+                                    },
+                                }
+                                dataset_writer.write(json.dumps(dataset_record, ensure_ascii=False) + "\n")
+                                dataset_writer.flush()
+                                generated_records += 1
+                                if len(generated_samples) < DatasetService.SAMPLE_PREVIEW_LIMIT:
+                                    generated_samples.append(dataset_record)
                     except Exception as ws_exc:
                         logger.exception(
                             "Workspace synthesis failed. task_id=%s workspace=%s",
@@ -322,6 +347,42 @@ class AgenticSynthesisService:
                         task_id=task_id,
                         processed_workspaces=processed_workspaces,
                     )
+
+            source_dataset = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id, user_id=user_id)
+            if generated_records > 0 and source_dataset is not None:
+                manifest = {
+                    "task_id": task_id,
+                    "source_dataset_id": dataset_id,
+                    "source_dataset_name": source_dataset.name,
+                    "generated_records": generated_records,
+                    "total_workspaces": len(workspaces),
+                    "processed_workspaces": processed_workspaces,
+                    "task_output_path": str(output_path),
+                    "dataset_output_path": str(dataset_output_path),
+                }
+                manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+                generated_dataset = self.dataset_service.register_generated_dataset(
+                    user_id=user_id,
+                    name=f"{source_dataset.name} Trajectory Synthesized T{task_id}",
+                    dataset_type="trajectory",
+                    language=str(source_dataset.language or "multi"),
+                    source=f"generated://agentic-synthesis/tasks/{task_id}",
+                    note=f"Synthesized trajectories generated from dataset {source_dataset.name}",
+                    file_path=str(dataset_output_path),
+                    file_name=dataset_output_path.name,
+                    size=dataset_output_path.stat().st_size,
+                    sample_data=generated_samples,
+                    origin_stage="trajectory_synthesis",
+                    origin_dataset_id=int(source_dataset.id),
+                    origin_task_type="trajectory_task",
+                    origin_task_id=task_id,
+                    generation_meta={
+                        **manifest,
+                        "manifest_path": str(manifest_path),
+                    },
+                    status="ready",
+                )
+                self.task_dao.update_generated_dataset(task_id=task_id, generated_dataset_id=int(generated_dataset["id"]))
 
             self.task_dao.mark_finished(
                 task_id=task_id,
@@ -389,6 +450,15 @@ class AgenticSynthesisService:
         masked = dict(payload or {})
         if "llm_api_key" in masked:
             masked["llm_api_key"] = "***"
+        return masked
+
+    def _enrich_task_payload(self, payload: Dict, user_id: int) -> Dict:
+        masked = self._sanitize_task_payload(payload)
+        generated_dataset_id = int(masked.get("generated_dataset_id") or 0)
+        if generated_dataset_id > 0:
+            dataset = self.dataset_dao.get_dataset_by_id(dataset_id=generated_dataset_id, user_id=user_id)
+            if dataset is not None:
+                masked["generated_dataset"] = dataset.to_dict()
         return masked
 
     @staticmethod
