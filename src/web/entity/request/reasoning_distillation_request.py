@@ -19,6 +19,8 @@ class ReasoningDistillationStartRequest(BaseModel):
     llm_base_url: str = Field(..., min_length=1)
     llm_model_name: str = Field(..., min_length=1, max_length=128)
     parallelism: int = Field(default=1, ge=1, le=32)
+    save_path: Optional[str] = Field(default=None, max_length=2000)
+    save_path_key: Optional[str] = Field(default=None, max_length=128)
     llm_params_json: Optional[str] = Field(default=None, max_length=16000)
 
     @field_validator("strategy", "llm_api_key", "llm_base_url", "llm_model_name")
@@ -29,7 +31,7 @@ class ReasoningDistillationStartRequest(BaseModel):
             raise ValueError("field must not be empty")
         return normalized
 
-    @field_validator("prompt", "llm_params_json")
+    @field_validator("prompt", "save_path", "save_path_key", "llm_params_json")
     @classmethod
     def _normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
         if value is None:

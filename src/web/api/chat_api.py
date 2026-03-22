@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agents.context import set_event_bus, set_workspace
+from agents.context import set_event_bus, set_python_interpreter, set_workspace
 from agents.event_bus import EventBus
 from utils.auth_guard import get_login_user
 from utils.config_loader import get_config
@@ -19,9 +19,11 @@ from utils.logger import logger
 from utils.model_factory import reset_model_override, set_model_override
 from web.entity.request import AssetImportRequest, ChatRequest
 from web.service.agent_asset_service import AgentAssetService
+from web.service.sandbox_environment_service import SandboxEnvironmentService
 
 router = APIRouter(tags=["agent-interaction"])
 _asset_service = AgentAssetService()
+_sandbox_environment_service = SandboxEnvironmentService()
 _WEB_ROOT = Path(__file__).resolve().parents[1]
 _BACKEND_ROOT = Path(__file__).resolve().parents[3]
 _ARTIFACT_FALLBACK_BASES = (_WEB_ROOT, _BACKEND_ROOT, Path.cwd())
@@ -413,6 +415,11 @@ async def chat(req: ChatRequest, request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
+        sandbox_environment = _sandbox_environment_service.resolve_python_executable(req.sandbox_environment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     workspace_name = str(runtime["workspace_name"])
     workspace_dir = runtime["workspace_dir"]
 
@@ -450,7 +457,7 @@ async def chat(req: ChatRequest, request: Request):
     model_debug = _build_model_debug_info(selected_model_override)
 
     logger.info(
-        "AgentInteraction chat request received. user_id=%s username=%s session_id=%s workspace=%s selected_files=%s provider=%s model=%s endpoint=%s",
+        "AgentInteraction chat request received. user_id=%s username=%s session_id=%s workspace=%s selected_files=%s provider=%s model=%s endpoint=%s sandbox=%s",
         user_id,
         username,
         session_id,
@@ -459,6 +466,7 @@ async def chat(req: ChatRequest, request: Request):
         model_debug["provider"],
         model_debug["model_name"],
         model_debug["endpoint"],
+        sandbox_environment.get("python_path"),
     )
 
     async def event_stream() -> AsyncGenerator[str, None]:
@@ -468,6 +476,7 @@ async def chat(req: ChatRequest, request: Request):
 
         set_event_bus(event_bus)
         set_workspace(str(workspace_dir))
+        set_python_interpreter(str(sandbox_environment.get("python_path") or ""))
         model_override_token = set_model_override(selected_model_override)
 
         try:
@@ -482,6 +491,7 @@ async def chat(req: ChatRequest, request: Request):
                     "selected_file_paths": selected_file_paths,
                     "context_items": staged_context_items,
                     "model": selected_model_override,
+                    "sandbox_environment": sandbox_environment,
                 },
             )
 
@@ -612,6 +622,7 @@ async def chat(req: ChatRequest, request: Request):
             await event_bus.close()
             set_event_bus(None)
             set_workspace("")
+            set_python_interpreter("")
             if model_override_token is not None:
                 reset_model_override(model_override_token)
 

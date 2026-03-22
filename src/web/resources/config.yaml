@@ -23,6 +23,19 @@ logging:
 workspace:
   base_path: "workspace"
 
+synthesis:
+  output_paths:
+    - key: "default"
+      label: "Default Output"
+      path: "output"
+      default: true
+    - key: "staging"
+      label: "Staging Output"
+      path: "output/staging"
+    - key: "archive"
+      label: "Archive Output"
+      path: "output/archive"
+
 model:
   provider: "ollama"
   ollama:

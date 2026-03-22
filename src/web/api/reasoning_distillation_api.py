@@ -39,9 +39,21 @@ def start_reasoning_distillation_task(request: Request, body: ReasoningDistillat
             llm_base_url=body.llm_base_url,
             llm_model_name=body.llm_model_name,
             parallelism=body.parallelism,
+            save_path=body.save_path,
+            save_path_key=body.save_path_key,
             llm_params_json=body.llm_params_json,
         )
         return _ok(data=data, message="reasoning distillation task started")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/output-path-options")
+def list_reasoning_distillation_output_path_options(request: Request):
+    try:
+        assert_login(request)
+        data = _service.list_output_path_options(task_namespace="reasoning_distillation")
+        return _ok(data=data, message="reasoning distillation output path options fetched")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

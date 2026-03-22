@@ -66,6 +66,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
         llm_base_url: str,
         llm_model_name: str,
         parallelism: int = 1,
+        save_path: Optional[str] = None,
+        save_path_key: Optional[str] = None,
         llm_params_json: Optional[str] = None,
     ) -> Dict:
         source_context = self._build_source_context(
@@ -97,7 +99,14 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "llm_model_name": str(llm_model_name or "").strip(),
                 "parallelism": normalized_parallelism,
                 "llm_params_json": json.dumps(llm_params, ensure_ascii=False) if llm_params else None,
-                "output_file_path": str(self._resolve_task_output_path(user_id=user_id, task_id=0)),
+                "output_file_path": str(
+                    self._resolve_task_output_path(
+                        user_id=user_id,
+                        task_id=0,
+                        save_path=save_path,
+                        save_path_key=save_path_key,
+                    )
+                ),
                 "generated_dataset_id": None,
                 "total_items": len(source_items),
                 "processed_items": 0,
@@ -105,7 +114,12 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "avg_tokens": 0,
             }
         )
-        output_path = self._resolve_task_output_path(user_id=user_id, task_id=int(task.id))
+        output_path = self._resolve_task_output_path(
+            user_id=user_id,
+            task_id=int(task.id),
+            save_path=save_path,
+            save_path_key=save_path_key,
+        )
         self.distillation_task_dao.update_output_file_path(int(task.id), str(output_path))
         task = self.distillation_task_dao.get_task_by_id(int(task.id), user_id=int(user_id)) or task
 
@@ -765,9 +779,20 @@ class ReasoningDistillationService(AgenticSynthesisService):
         total_chars = sum(len(part) for part in text_parts)
         return max(1, int(total_chars / 4))
 
-    @staticmethod
-    def _resolve_task_output_path(user_id: int, task_id: int) -> Path:
-        output_dir = PROJECT_ROOT / "output" / "reasoning_distillation" / str(int(user_id)) / str(int(task_id))
+    def _resolve_task_output_path(
+        self,
+        user_id: int,
+        task_id: int,
+        *,
+        save_path: Optional[str] = None,
+        save_path_key: Optional[str] = None,
+    ) -> Path:
+        output_root = self._resolve_selected_output_root(
+            save_path=save_path,
+            save_path_key=save_path_key,
+            task_namespace="reasoning_distillation",
+        )
+        output_dir = output_root / str(int(user_id)) / str(int(task_id))
         output_dir.mkdir(parents=True, exist_ok=True)
         return (output_dir / "task_results.jsonl").resolve()
 

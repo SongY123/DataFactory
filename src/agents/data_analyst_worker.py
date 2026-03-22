@@ -19,8 +19,9 @@ from utils.model_factory import create_model, get_formatter
 from agentscope.agent import ReActAgent
 from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg
-from agentscope.tool import Toolkit, ToolResponse, execute_python_code
+from agentscope.tool import Toolkit, ToolResponse
 
+from agents.python_execution import execute_python_code
 # Import prompt
 from agents.prompts import DATA_ANALYST_PROMPT
 # Import data analysis tools

@@ -55,3 +55,8 @@ class ChatRequest(BaseModel):
         default=None,
         description="Optional platform objects or asset files to stage into the runtime workspace",
     )
+    sandbox_environment_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional server-side Python sandbox environment id",
+    )

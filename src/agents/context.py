@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 event_bus_context: ContextVar[Optional[EventBus]] = ContextVar("event_bus_context", default=None)
 workspace_context: ContextVar[str] = ContextVar("workspace_context", default="")
+python_interpreter_context: ContextVar[str] = ContextVar("python_interpreter_context", default="")
 
 
 def get_event_bus() -> Optional[EventBus]:
@@ -33,6 +34,14 @@ def get_workspace() -> str:
 
 def set_workspace(workspace: str) -> None:
     workspace_context.set(str(workspace or ""))
+
+
+def get_python_interpreter() -> str:
+    return str(python_interpreter_context.get() or "")
+
+
+def set_python_interpreter(python_interpreter: str) -> None:
+    python_interpreter_context.set(str(python_interpreter or ""))
 
 
 def _resolve_workspace_base() -> Path:

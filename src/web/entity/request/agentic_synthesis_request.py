@@ -13,6 +13,9 @@ class AgenticSynthesisStartRequest(BaseModel):
     llm_base_url: str = Field(..., min_length=1)
     llm_model_name: str = Field(..., min_length=1)
     parallelism: int = Field(default=1, ge=1, le=32)
+    save_path: Optional[str] = Field(default=None, max_length=2000)
+    save_path_key: Optional[str] = Field(default=None, max_length=128)
+    sandbox_environment_id: Optional[str] = Field(default=None, max_length=128)
     llm_params_json: Optional[str] = Field(default=None, max_length=16000)
 
     @field_validator("prompt", "llm_api_key", "llm_base_url", "llm_model_name")
@@ -23,9 +26,9 @@ class AgenticSynthesisStartRequest(BaseModel):
             raise ValueError("field must not be empty")
         return normalized
 
-    @field_validator("llm_params_json")
+    @field_validator("save_path", "save_path_key", "sandbox_environment_id", "llm_params_json")
     @classmethod
-    def _validate_llm_params_json(cls, value: Optional[str]) -> Optional[str]:
+    def _validate_optional_text(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
         normalized = str(value or "").strip()

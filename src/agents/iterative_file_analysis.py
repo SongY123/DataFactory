@@ -12,7 +12,7 @@ from typing import Any, AsyncGenerator
 
 from pydantic import BaseModel, Field, ValidationError
 
-from agents.context import get_event_bus
+from agents.context import get_event_bus, get_python_interpreter
 from agents.event_bus import create_agent_error_event, create_agent_finish_event, create_agent_start_event, create_stream_event
 from agents.result_utils import extract_agent_result_text
 from utils.config_loader import get_config
@@ -233,6 +233,7 @@ class IterativeFileAnalyzer:
         self.file_path = (self.workspace_dir / self.selected_file_path).resolve()
         self.file_name = self.file_path.name or self.selected_file_path
         self.event_bus = get_event_bus()
+        self.python_executable = str(get_python_interpreter() or sys.executable)
         self.parser = AgentFileParser()
         self.model = create_model(stream=False)
         self.streaming_text_model = create_model(stream=True)
@@ -610,7 +611,7 @@ Requirements:
         script_path.write_text(script_body, encoding="utf-8")
 
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
+            self.python_executable,
             str(script_path),
             cwd=str(self.workspace_dir),
             stdout=asyncio.subprocess.PIPE,
@@ -807,7 +808,7 @@ Requirements:
         script_path.write_text(script_body, encoding="utf-8")
 
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
+            self.python_executable,
             str(script_path),
             cwd=str(self.workspace_dir),
             stdout=asyncio.subprocess.PIPE,

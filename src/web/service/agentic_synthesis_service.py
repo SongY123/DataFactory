@@ -21,9 +21,11 @@ from urllib.error import URLError
 
 from ..dao import AgenticSynthesisResultDAO, AgenticSynthesisTaskDAO
 from ..dao.dataset_dao import DatasetDAO
+from utils.config_loader import get_config
 from utils.logger import logger
 from utils.pdf_support import get_pdf_reader
 from .dataset_service import DatasetService
+from .sandbox_environment_service import SandboxEnvironmentService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -53,6 +55,11 @@ SANDBOX_ALLOWED_LIBS = [
     "pyarrow",
     "pypdf",
 ]
+DEFAULT_OUTPUT_PATH_OPTIONS = [
+    {"key": "default", "label": "Default Output", "path": "output", "default": True},
+    {"key": "staging", "label": "Staging Output", "path": "output/staging"},
+    {"key": "archive", "label": "Archive Output", "path": "output/archive"},
+]
 
 
 class ModelOutputParseError(ValueError):
@@ -72,6 +79,7 @@ class AgenticSynthesisService:
         self.dataset_dao = dataset_dao or DatasetDAO()
         self.result_dao = result_dao or AgenticSynthesisResultDAO()
         self.dataset_service = DatasetService(dataset_dao=self.dataset_dao)
+        self.sandbox_environment_service = SandboxEnvironmentService()
         self._lock = threading.RLock()
         self._running_threads: Dict[int, threading.Thread] = {}
 
@@ -85,6 +93,9 @@ class AgenticSynthesisService:
         llm_base_url: str,
         llm_model_name: str,
         parallelism: int = 1,
+        save_path: Optional[str] = None,
+        save_path_key: Optional[str] = None,
+        sandbox_environment_id: Optional[str] = None,
         llm_params_json: Optional[str] = None,
     ) -> Dict:
         dataset = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id, user_id=user_id)
@@ -100,6 +111,8 @@ class AgenticSynthesisService:
         if not workspaces:
             raise ValueError("dataset has no direct workspace folders")
         normalized_parallelism = self._normalize_parallelism(parallelism, len(workspaces))
+        selected_environment = self.sandbox_environment_service.resolve_python_executable(sandbox_environment_id)
+        python_executable = str(selected_environment.get("python_path") or "").strip()
 
         task = self.task_dao.insert_task(
             user_id=user_id,
@@ -114,7 +127,12 @@ class AgenticSynthesisService:
             output_file_path="__pending__",
             total_workspaces=len(workspaces),
         )
-        output_path = self._resolve_output_path(user_id=user_id, task_id=int(task.id))
+        output_path = self._resolve_output_path(
+            user_id=user_id,
+            task_id=int(task.id),
+            save_path=save_path,
+            save_path_key=save_path_key,
+        )
         updated_task = self.task_dao.update_output_file_path(task_id=int(task.id), output_file_path=str(output_path))
         if updated_task is not None:
             task = updated_task
@@ -131,6 +149,7 @@ class AgenticSynthesisService:
                 str(llm_api_key or "").strip(),
                 str(llm_base_url or "").strip(),
                 str(llm_model_name or "").strip(),
+                python_executable,
                 normalized_parallelism,
                 llm_params,
                 output_path,
@@ -143,6 +162,13 @@ class AgenticSynthesisService:
         thread.start()
 
         return self._enrich_task_payload(task.to_dict(), user_id=int(user_id))
+
+    def list_output_path_options(self, *, task_namespace: str = "") -> Dict[str, Any]:
+        options, default_key = self._build_output_path_options(task_namespace=task_namespace)
+        return {
+            "default_key": default_key,
+            "options": options,
+        }
 
     def get_task(self, task_id: int, user_id: int) -> Optional[Dict]:
         task = self.task_dao.get_task_by_id(task_id=task_id, user_id=user_id)
@@ -185,6 +211,7 @@ class AgenticSynthesisService:
         llm_api_key: str,
         llm_base_url: str,
         llm_model_name: str,
+        python_executable: str,
         parallelism: int,
         llm_params: Dict[str, Any],
         output_path: Path,
@@ -214,6 +241,7 @@ class AgenticSynthesisService:
                                 llm_api_key=llm_api_key,
                                 llm_base_url=llm_base_url,
                                 llm_model_name=llm_model_name,
+                                python_executable=python_executable,
                                 llm_params=llm_params,
                             )
                             for workspace in workspaces
@@ -243,6 +271,7 @@ class AgenticSynthesisService:
                             llm_api_key=llm_api_key,
                             llm_base_url=llm_base_url,
                             llm_model_name=llm_model_name,
+                            python_executable=python_executable,
                             llm_params=llm_params,
                         )
                         generated_records, generated_samples = self._persist_workspace_records(
@@ -321,6 +350,7 @@ class AgenticSynthesisService:
         llm_api_key: str,
         llm_base_url: str,
         llm_model_name: str,
+        python_executable: str,
         llm_params: Dict[str, Any],
     ) -> Dict[str, Any]:
         entries: List[Dict[str, Any]] = []
@@ -338,6 +368,7 @@ class AgenticSynthesisService:
                     api_key=llm_api_key,
                     base_url=llm_base_url,
                     model_name=llm_model_name,
+                    python_executable=python_executable,
                     llm_params=llm_params,
                 )
             except Exception as q_exc:
@@ -542,11 +573,129 @@ class AgenticSynthesisService:
             return [normalized_root]
         return []
 
-    @staticmethod
-    def _resolve_output_path(user_id: int, task_id: int) -> Path:
-        output_dir = PROJECT_ROOT / "output" / str(int(user_id)) / str(int(task_id))
+    def _resolve_output_path(
+        self,
+        user_id: int,
+        task_id: int,
+        *,
+        save_path: Optional[str] = None,
+        save_path_key: Optional[str] = None,
+    ) -> Path:
+        base_root = self._resolve_selected_output_root(
+            save_path=save_path,
+            save_path_key=save_path_key,
+            task_namespace="",
+        )
+        output_dir = base_root / str(int(user_id)) / str(int(task_id))
         output_dir.mkdir(parents=True, exist_ok=True)
         return (output_dir / "result.jsonl").resolve()
+
+    def _resolve_selected_output_root(
+        self,
+        *,
+        save_path: Optional[str] = None,
+        save_path_key: Optional[str],
+        task_namespace: str,
+    ) -> Path:
+        local_root = self._resolve_local_output_root(save_path=save_path)
+        if local_root is not None:
+            return local_root
+        options, default_key = self._build_output_path_options(task_namespace=task_namespace)
+        option_map = {str(item["key"]): item for item in options}
+        target_key = str(save_path_key or "").strip() or str(default_key)
+        selected = option_map.get(target_key)
+        if not selected:
+            raise ValueError(f"unknown save_path_key: {save_path_key}")
+        path = Path(str(selected["path"])).resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _resolve_local_output_root(*, save_path: Optional[str]) -> Optional[Path]:
+        raw = str(save_path or "").strip()
+        if not raw:
+            return None
+        path = Path(raw).expanduser()
+        resolved = path if path.is_absolute() else (PROJECT_ROOT / path)
+        resolved = resolved.resolve()
+        if resolved.exists() and not resolved.is_dir():
+            raise ValueError(f"save_path must be a directory: {resolved}")
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    def _build_output_path_options(self, *, task_namespace: str) -> Tuple[List[Dict[str, str]], str]:
+        raw_options = self._get_configured_output_path_options()
+        options: List[Dict[str, str]] = []
+        default_key = "default"
+        seen_keys = set()
+
+        for index, item in enumerate(raw_options):
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or f"option-{index + 1}").strip() or f"option-{index + 1}"
+            if key in seen_keys:
+                continue
+            raw_path = str(item.get("path") or "output").strip() or "output"
+            try:
+                base_root = self._resolve_output_base_path(raw_path)
+            except ValueError:
+                continue
+            target_root = (base_root / task_namespace).resolve() if str(task_namespace or "").strip() else base_root
+            try:
+                relative_path = str(target_root.relative_to(PROJECT_ROOT))
+            except ValueError:
+                continue
+            target_root.mkdir(parents=True, exist_ok=True)
+            options.append(
+                {
+                    "key": key,
+                    "label": str(item.get("label") or key).strip() or key,
+                    "path": str(target_root),
+                    "relative_path": relative_path,
+                }
+            )
+            seen_keys.add(key)
+            if item.get("default") is True:
+                default_key = key
+
+        if not options:
+            fallback_root = self._resolve_output_base_path("output")
+            target_root = (fallback_root / task_namespace).resolve() if str(task_namespace or "").strip() else fallback_root
+            target_root.mkdir(parents=True, exist_ok=True)
+            options = [
+                {
+                    "key": "default",
+                    "label": "Default Output",
+                    "path": str(target_root),
+                    "relative_path": str(target_root.relative_to(PROJECT_ROOT)),
+                }
+            ]
+            default_key = "default"
+
+        if default_key not in {str(item["key"]) for item in options}:
+            default_key = str(options[0]["key"])
+        return options, default_key
+
+    @staticmethod
+    def _get_configured_output_path_options() -> List[Dict[str, Any]]:
+        try:
+            configured = get_config("synthesis.output_paths", None)
+        except Exception:
+            configured = None
+        if isinstance(configured, list) and configured:
+            return configured
+        return list(DEFAULT_OUTPUT_PATH_OPTIONS)
+
+    @staticmethod
+    def _resolve_output_base_path(path_value: str) -> Path:
+        raw = Path(str(path_value or "").strip() or "output")
+        resolved = raw if raw.is_absolute() else (PROJECT_ROOT / raw)
+        resolved = resolved.resolve()
+        try:
+            resolved.relative_to(PROJECT_ROOT)
+        except ValueError as exc:
+            raise ValueError(f"output path must stay under project root: {path_value}") from exc
+        return resolved
 
     @staticmethod
     def _sanitize_task_payload(payload: Dict) -> Dict:
@@ -945,6 +1094,7 @@ class AgenticSynthesisService:
         api_key: str,
         base_url: str,
         model_name: str,
+        python_executable: str,
         llm_params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, str, Optional[str], Optional[str]]:
         system_prompt = (
@@ -1091,7 +1241,11 @@ class AgenticSynthesisService:
                 if not code:
                     code = "print('No code generated by model for this step.')"
 
-                execute_result = self._run_python_in_sandbox(workspace_dir=workspace_dir, code=code)
+                execute_result = self._run_python_in_sandbox(
+                    workspace_dir=workspace_dir,
+                    code=code,
+                    python_executable=python_executable,
+                )
                 execute_text = self._format_execute_result(execute_result)
                 last_execute = execute_result
                 steps.append(
@@ -1359,7 +1513,13 @@ class AgenticSynthesisService:
         }
         return json.dumps(payload, ensure_ascii=False)
 
-    def _run_python_in_sandbox(self, workspace_dir: Path, code: str, timeout_seconds: int = 25) -> Dict[str, Any]:
+    def _run_python_in_sandbox(
+        self,
+        workspace_dir: Path,
+        code: str,
+        python_executable: Optional[str] = None,
+        timeout_seconds: int = 25,
+    ) -> Dict[str, Any]:
         runner_dir = workspace_dir / ".agentic_runtime"
         runner_dir.mkdir(parents=True, exist_ok=True)
         script_path = runner_dir / "sandbox_exec.py"
@@ -1393,8 +1553,9 @@ class AgenticSynthesisService:
                 env[key] = ""
 
         try:
+            resolved_python = str(Path(str(python_executable or sys.executable)).expanduser().resolve())
             proc = subprocess.run(
-                [sys.executable, "-I", str(script_path)],
+                [resolved_python, "-I", str(script_path)],
                 cwd=str(workspace_dir),
                 capture_output=True,
                 text=True,
