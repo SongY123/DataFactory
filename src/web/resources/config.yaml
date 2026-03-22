@@ -7,7 +7,10 @@ database:
   db_path: "datafactory.db"
 
 auth:
-  auto_login_as_admin: false
+  auto_login_as_admin: true
+
+dataset:
+  base_path: "uploads"
 
 logging:
   level: INFO
@@ -19,6 +22,19 @@ logging:
 
 workspace:
   base_path: "workspace"
+
+synthesis:
+  output_paths:
+    - key: "default"
+      label: "Default Output"
+      path: "output"
+      default: true
+    - key: "staging"
+      label: "Staging Output"
+      path: "output/staging"
+    - key: "archive"
+      label: "Archive Output"
+      path: "output/archive"
 
 model:
   provider: "ollama"
@@ -53,4 +69,3 @@ agent:
     docx_max_paragraphs: 120
     docx_max_tables: 12
     xlsx_max_sheets: 12
-

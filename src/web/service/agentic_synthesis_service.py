@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 from urllib import request as urllib_request
@@ -20,8 +21,11 @@ from urllib.error import URLError
 
 from ..dao import AgenticSynthesisResultDAO, AgenticSynthesisTaskDAO
 from ..dao.dataset_dao import DatasetDAO
+from utils.config_loader import get_config
 from utils.logger import logger
 from utils.pdf_support import get_pdf_reader
+from .dataset_service import DatasetService
+from .sandbox_environment_service import SandboxEnvironmentService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -51,6 +55,11 @@ SANDBOX_ALLOWED_LIBS = [
     "pyarrow",
     "pypdf",
 ]
+DEFAULT_OUTPUT_PATH_OPTIONS = [
+    {"key": "default", "label": "Default Output", "path": "output", "default": True},
+    {"key": "staging", "label": "Staging Output", "path": "output/staging"},
+    {"key": "archive", "label": "Archive Output", "path": "output/archive"},
+]
 
 
 class ModelOutputParseError(ValueError):
@@ -69,6 +78,8 @@ class AgenticSynthesisService:
         self.task_dao = task_dao or AgenticSynthesisTaskDAO()
         self.dataset_dao = dataset_dao or DatasetDAO()
         self.result_dao = result_dao or AgenticSynthesisResultDAO()
+        self.dataset_service = DatasetService(dataset_dao=self.dataset_dao)
+        self.sandbox_environment_service = SandboxEnvironmentService()
         self._lock = threading.RLock()
         self._running_threads: Dict[int, threading.Thread] = {}
 
@@ -81,16 +92,27 @@ class AgenticSynthesisService:
         llm_api_key: str,
         llm_base_url: str,
         llm_model_name: str,
+        parallelism: int = 1,
+        save_path: Optional[str] = None,
+        save_path_key: Optional[str] = None,
+        sandbox_environment_id: Optional[str] = None,
+        llm_params_json: Optional[str] = None,
     ) -> Dict:
         dataset = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id, user_id=user_id)
         if dataset is None:
             raise ValueError("dataset not found for current user")
-        effective_prompt = FIXED_TASK_PROMPT
-        effective_action_tags = list(FIXED_ACTION_TAGS)
+        effective_prompt = str(prompt or "").strip() or FIXED_TASK_PROMPT
+        effective_action_tags = [str(item or "").strip() for item in (action_tags or []) if str(item or "").strip()]
+        if not effective_action_tags:
+            effective_action_tags = list(FIXED_ACTION_TAGS)
+        llm_params = self._parse_llm_params_json(llm_params_json)
         dataset_root = self._resolve_path(str(dataset.file_path or ""))
         workspaces = self._collect_direct_workspaces(dataset_root)
         if not workspaces:
             raise ValueError("dataset has no direct workspace folders")
+        normalized_parallelism = self._normalize_parallelism(parallelism, len(workspaces))
+        selected_environment = self.sandbox_environment_service.resolve_python_executable(sandbox_environment_id)
+        python_executable = str(selected_environment.get("python_path") or "").strip()
 
         task = self.task_dao.insert_task(
             user_id=user_id,
@@ -100,10 +122,17 @@ class AgenticSynthesisService:
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
             llm_model_name=llm_model_name,
+            parallelism=normalized_parallelism,
+            llm_params_json=json.dumps(llm_params, ensure_ascii=False) if llm_params else None,
             output_file_path="__pending__",
             total_workspaces=len(workspaces),
         )
-        output_path = self._resolve_output_path(user_id=user_id, task_id=int(task.id))
+        output_path = self._resolve_output_path(
+            user_id=user_id,
+            task_id=int(task.id),
+            save_path=save_path,
+            save_path_key=save_path_key,
+        )
         updated_task = self.task_dao.update_output_file_path(task_id=int(task.id), output_file_path=str(output_path))
         if updated_task is not None:
             task = updated_task
@@ -120,6 +149,9 @@ class AgenticSynthesisService:
                 str(llm_api_key or "").strip(),
                 str(llm_base_url or "").strip(),
                 str(llm_model_name or "").strip(),
+                python_executable,
+                normalized_parallelism,
+                llm_params,
                 output_path,
             ),
             daemon=True,
@@ -129,13 +161,20 @@ class AgenticSynthesisService:
             self._running_threads[int(task.id)] = thread
         thread.start()
 
-        return self._sanitize_task_payload(task.to_dict())
+        return self._enrich_task_payload(task.to_dict(), user_id=int(user_id))
+
+    def list_output_path_options(self, *, task_namespace: str = "") -> Dict[str, Any]:
+        options, default_key = self._build_output_path_options(task_namespace=task_namespace)
+        return {
+            "default_key": default_key,
+            "options": options,
+        }
 
     def get_task(self, task_id: int, user_id: int) -> Optional[Dict]:
         task = self.task_dao.get_task_by_id(task_id=task_id, user_id=user_id)
         if task is None:
             return None
-        payload = self._sanitize_task_payload(task.to_dict())
+        payload = self._enrich_task_payload(task.to_dict(), user_id=user_id)
         payload["result_count"] = self.result_dao.count_results_by_task(task_id=task_id, user_id=user_id)
         return payload
 
@@ -143,7 +182,7 @@ class AgenticSynthesisService:
         rows = self.task_dao.list_tasks(limit=limit, user_id=user_id)
         result: List[Dict] = []
         for row in rows:
-            payload = self._sanitize_task_payload(row.to_dict())
+            payload = self._enrich_task_payload(row.to_dict(), user_id=user_id)
             payload["result_count"] = self.result_dao.count_results_by_task(task_id=int(row.id), user_id=user_id)
             result.append(payload)
         return result
@@ -172,156 +211,116 @@ class AgenticSynthesisService:
         llm_api_key: str,
         llm_base_url: str,
         llm_model_name: str,
+        python_executable: str,
+        parallelism: int,
+        llm_params: Dict[str, Any],
         output_path: Path,
     ) -> None:
         processed_workspaces = 0
+        generated_samples: List[Dict[str, Any]] = []
+        generated_records = 0
+        effective_parallelism = self._normalize_parallelism(parallelism, len(workspaces))
 
         try:
             self.task_dao.mark_started(task_id=task_id)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            with output_path.open("w", encoding="utf-8") as writer:
-                for workspace in workspaces:
-                    tmp_dir = self._prepare_workspace_copy(task_id=task_id, workspace=workspace)
-                    try:
-                        workspace_name = workspace.name
-                        workspace_context = self._build_workspace_context(tmp_dir)
-                        workspace_audit: Optional[str] = None
-                        try:
-                            questions = self._generate_questions(
+            dataset_output_path = output_path.with_name("trajectory_dataset.jsonl")
+            manifest_path = output_path.with_name("manifest.json")
+            with output_path.open("w", encoding="utf-8") as writer, dataset_output_path.open("w", encoding="utf-8") as dataset_writer:
+                if effective_parallelism > 1:
+                    with ThreadPoolExecutor(max_workers=effective_parallelism, thread_name_prefix=f"trajectory-{task_id}") as executor:
+                        futures = [
+                            executor.submit(
+                                self._process_workspace_records,
+                                task_id=task_id,
+                                user_id=user_id,
+                                dataset_id=dataset_id,
+                                workspace=workspace,
                                 prompt=prompt,
                                 action_tags=action_tags,
-                                workspace_name=workspace_name,
-                                workspace_context=workspace_context,
-                                api_key=llm_api_key,
-                                base_url=llm_base_url,
-                                model_name=llm_model_name,
+                                llm_api_key=llm_api_key,
+                                llm_base_url=llm_base_url,
+                                llm_model_name=llm_model_name,
+                                python_executable=python_executable,
+                                llm_params=llm_params,
                             )
-                        except Exception as q_exc:
-                            workspace_audit = self._build_audit_text("question_generation", q_exc)
-                            logger.warning(
-                                "Question generation failed, use fallback. task_id=%s workspace=%s err=%s",
-                                task_id,
-                                workspace_name,
-                                q_exc,
+                            for workspace in workspaces
+                        ]
+                        for future in as_completed(futures):
+                            workspace_payload = future.result()
+                            generated_records, generated_samples = self._persist_workspace_records(
+                                user_id=user_id,
+                                dataset_id=dataset_id,
+                                workspace_payload=workspace_payload,
+                                writer=writer,
+                                dataset_writer=dataset_writer,
+                                generated_records=generated_records,
+                                generated_samples=generated_samples,
                             )
-                            if workspace_audit:
-                                logger.warning(
-                                    "Question generation raw output (truncated). task_id=%s workspace=%s audit=%s",
-                                    task_id,
-                                    workspace_name,
-                                    workspace_audit,
-                                )
-                            questions = self._build_fallback_questions(workspace_context=workspace_context)
-
-                        if not questions:
-                            questions = self._build_fallback_questions(workspace_context=workspace_context)
-
-                        for question in questions:
-                            trajectory, answer_text, solve_error, solve_audit = self._synthesize_trajectory(
-                                question=question,
-                                workspace_name=workspace_name,
-                                workspace_context=workspace_context,
-                                workspace_dir=tmp_dir,
-                                api_key=llm_api_key,
-                                base_url=llm_base_url,
-                                model_name=llm_model_name,
-                            )
-                            evaluation = self._evaluate_result(
-                                question=question,
-                                trajectory=trajectory,
-                                answer_text=answer_text,
-                                workspace_name=workspace_name,
-                                workspace_context=workspace_context,
-                                api_key=llm_api_key,
-                                base_url=llm_base_url,
-                                model_name=llm_model_name,
-                            )
-
-                            status = "completed"
-                            error_text = None
-                            if solve_error:
-                                status = "failed"
-                                error_text = solve_error
-
-                            audit_text = solve_audit or workspace_audit
-
-                            record = {
-                                "task_id": task_id,
-                                "dataset_id": dataset_id,
-                                "workspace_name": workspace_name,
-                                "status": status,
-                                "question": question,
-                                "trajectory": trajectory,
-                                "evaluation": evaluation,
-                                "error": error_text,
-                                "model_output_audit": audit_text,
-                            }
-
-                            self.result_dao.insert_result(
-                                {
-                                    "task_id": task_id,
-                                    "user_id": user_id,
-                                    "dataset_id": dataset_id,
-                                    "workspace_name": workspace_name,
-                                    "question": question,
-                                    "trajectory": trajectory,
-                                    "evaluation_json": json.dumps(evaluation, ensure_ascii=False),
-                                    "status": status,
-                                    "error_message": error_text,
-                                    "model_output_audit": audit_text,
-                                }
-                            )
-                            writer.write(json.dumps(record, ensure_ascii=False) + "\n")
-                            writer.flush()
-                    except Exception as ws_exc:
-                        logger.exception(
-                            "Workspace synthesis failed. task_id=%s workspace=%s",
-                            task_id,
-                            workspace.name,
+                            processed_workspaces += 1
+                            self.task_dao.update_progress(task_id=task_id, processed_workspaces=processed_workspaces)
+                else:
+                    for workspace in workspaces:
+                        workspace_payload = self._process_workspace_records(
+                            task_id=task_id,
+                            user_id=user_id,
+                            dataset_id=dataset_id,
+                            workspace=workspace,
+                            prompt=prompt,
+                            action_tags=action_tags,
+                            llm_api_key=llm_api_key,
+                            llm_base_url=llm_base_url,
+                            llm_model_name=llm_model_name,
+                            python_executable=python_executable,
+                            llm_params=llm_params,
                         )
-                        failed_record = {
-                            "task_id": task_id,
-                            "dataset_id": dataset_id,
-                            "workspace_name": workspace.name,
-                            "status": "failed",
-                            "question": "Workspace-level synthesis failure",
-                            "trajectory": self._wrap_tag("Analyze", "Workspace pipeline failed before question synthesis")
-                            + "\n"
-                            + self._wrap_tag("Execute", str(ws_exc))
-                            + "\n"
-                            + self._wrap_tag("Answer", ""),
-                            "evaluation": {
-                                "difficulty": 1,
-                                "quality": 1,
-                                "ability": "error-handling",
-                            },
-                            "error": str(ws_exc),
-                                "model_output_audit": self._build_audit_text("workspace_pipeline", ws_exc),
-                        }
-                        self.result_dao.insert_result(
-                            {
-                                "task_id": task_id,
-                                "user_id": user_id,
-                                "dataset_id": dataset_id,
-                                "workspace_name": workspace.name,
-                                "question": failed_record["question"],
-                                "trajectory": failed_record["trajectory"],
-                                "evaluation_json": json.dumps(failed_record["evaluation"], ensure_ascii=False),
-                                "status": "failed",
-                                "error_message": str(ws_exc),
-                                "model_output_audit": failed_record.get("model_output_audit"),
-                            }
+                        generated_records, generated_samples = self._persist_workspace_records(
+                            user_id=user_id,
+                            dataset_id=dataset_id,
+                            workspace_payload=workspace_payload,
+                            writer=writer,
+                            dataset_writer=dataset_writer,
+                            generated_records=generated_records,
+                            generated_samples=generated_samples,
                         )
-                        writer.write(json.dumps(failed_record, ensure_ascii=False) + "\n")
-                        writer.flush()
-                    finally:
-                        self._cleanup_workspace_copy(tmp_dir)
+                        processed_workspaces += 1
+                        self.task_dao.update_progress(task_id=task_id, processed_workspaces=processed_workspaces)
 
-                    processed_workspaces += 1
-                    self.task_dao.update_progress(
-                        task_id=task_id,
-                        processed_workspaces=processed_workspaces,
-                    )
+            source_dataset = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id, user_id=user_id)
+            if generated_records > 0 and source_dataset is not None:
+                manifest = {
+                    "task_id": task_id,
+                    "source_dataset_id": dataset_id,
+                    "source_dataset_name": source_dataset.name,
+                    "generated_records": generated_records,
+                    "total_workspaces": len(workspaces),
+                    "processed_workspaces": processed_workspaces,
+                    "task_output_path": str(output_path),
+                    "dataset_output_path": str(dataset_output_path),
+                }
+                manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+                generated_dataset = self.dataset_service.register_generated_dataset(
+                    user_id=user_id,
+                    name=f"{source_dataset.name} Trajectory Synthesized T{task_id}",
+                    dataset_type="trajectory",
+                    language=str(source_dataset.language or "multi"),
+                    source=f"generated://agentic-synthesis/tasks/{task_id}",
+                    note=f"Synthesized trajectories generated from dataset {source_dataset.name}",
+                    file_path=str(dataset_output_path),
+                    file_name=dataset_output_path.name,
+                    size=dataset_output_path.stat().st_size,
+                    sample_data=generated_samples,
+                    origin_stage="trajectory_synthesis",
+                    origin_dataset_id=int(source_dataset.id),
+                    origin_task_type="trajectory_task",
+                    origin_task_id=task_id,
+                    generation_meta={
+                        **manifest,
+                        "manifest_path": str(manifest_path),
+                    },
+                    status="ready",
+                )
+                self.task_dao.update_generated_dataset(task_id=task_id, generated_dataset_id=int(generated_dataset["id"]))
 
             self.task_dao.mark_finished(
                 task_id=task_id,
@@ -338,6 +337,202 @@ class AgenticSynthesisService:
         finally:
             with self._lock:
                 self._running_threads.pop(task_id, None)
+
+    def _process_workspace_records(
+        self,
+        *,
+        task_id: int,
+        user_id: int,
+        dataset_id: int,
+        workspace: Path,
+        prompt: str,
+        action_tags: List[str],
+        llm_api_key: str,
+        llm_base_url: str,
+        llm_model_name: str,
+        python_executable: str,
+        llm_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        entries: List[Dict[str, Any]] = []
+        tmp_dir = self._prepare_workspace_copy(task_id=task_id, workspace=workspace)
+        try:
+            workspace_name = workspace.name
+            workspace_context = self._build_workspace_context(tmp_dir)
+            workspace_audit: Optional[str] = None
+            try:
+                questions = self._generate_questions(
+                    prompt=prompt,
+                    action_tags=action_tags,
+                    workspace_name=workspace_name,
+                    workspace_context=workspace_context,
+                    api_key=llm_api_key,
+                    base_url=llm_base_url,
+                    model_name=llm_model_name,
+                    python_executable=python_executable,
+                    llm_params=llm_params,
+                )
+            except Exception as q_exc:
+                workspace_audit = self._build_audit_text("question_generation", q_exc)
+                logger.warning(
+                    "Question generation failed, use fallback. task_id=%s workspace=%s err=%s",
+                    task_id,
+                    workspace_name,
+                    q_exc,
+                )
+                if workspace_audit:
+                    logger.warning(
+                        "Question generation raw output (truncated). task_id=%s workspace=%s audit=%s",
+                        task_id,
+                        workspace_name,
+                        workspace_audit,
+                    )
+                questions = self._build_fallback_questions(workspace_context=workspace_context)
+
+            if not questions:
+                questions = self._build_fallback_questions(workspace_context=workspace_context)
+
+            for question in questions:
+                trajectory, answer_text, solve_error, solve_audit = self._synthesize_trajectory(
+                    question=question,
+                    workspace_name=workspace_name,
+                    workspace_context=workspace_context,
+                    workspace_dir=tmp_dir,
+                    api_key=llm_api_key,
+                    base_url=llm_base_url,
+                    model_name=llm_model_name,
+                    llm_params=llm_params,
+                )
+                evaluation = self._evaluate_result(
+                    question=question,
+                    trajectory=trajectory,
+                    answer_text=answer_text,
+                    workspace_name=workspace_name,
+                    workspace_context=workspace_context,
+                    api_key=llm_api_key,
+                    base_url=llm_base_url,
+                    model_name=llm_model_name,
+                    llm_params=llm_params,
+                )
+
+                status = "completed"
+                error_text = None
+                if solve_error:
+                    status = "failed"
+                    error_text = solve_error
+
+                audit_text = solve_audit or workspace_audit
+                record = {
+                    "task_id": task_id,
+                    "dataset_id": dataset_id,
+                    "workspace_name": workspace_name,
+                    "status": status,
+                    "question": question,
+                    "trajectory": trajectory,
+                    "evaluation": evaluation,
+                    "error": error_text,
+                    "model_output_audit": audit_text,
+                }
+                dataset_record = None
+                if status == "completed":
+                    dataset_record = {
+                        "question": question,
+                        "trajectory": trajectory,
+                        "evaluation": evaluation,
+                        "metadata": {
+                            "task_id": task_id,
+                            "dataset_id": dataset_id,
+                            "workspace_name": workspace_name,
+                            "source_question": question,
+                        },
+                    }
+                entries.append({"record": record, "dataset_record": dataset_record})
+        except Exception as ws_exc:
+            logger.exception("Workspace synthesis failed. task_id=%s workspace=%s", task_id, workspace.name)
+            failed_record = {
+                "task_id": task_id,
+                "dataset_id": dataset_id,
+                "workspace_name": workspace.name,
+                "status": "failed",
+                "question": "Workspace-level synthesis failure",
+                "trajectory": self._wrap_tag("Analyze", "Workspace pipeline failed before question synthesis")
+                + "\n"
+                + self._wrap_tag("Execute", str(ws_exc))
+                + "\n"
+                + self._wrap_tag("Answer", ""),
+                "evaluation": {
+                    "difficulty": 1,
+                    "quality": 1,
+                    "ability": "error-handling",
+                },
+                "error": str(ws_exc),
+                "model_output_audit": self._build_audit_text("workspace_pipeline", ws_exc),
+            }
+            entries.append({"record": failed_record, "dataset_record": None})
+        finally:
+            self._cleanup_workspace_copy(tmp_dir)
+
+        return {"workspace_name": workspace.name, "entries": entries}
+
+    def _persist_workspace_records(
+        self,
+        *,
+        user_id: int,
+        dataset_id: int,
+        workspace_payload: Dict[str, Any],
+        writer,
+        dataset_writer,
+        generated_records: int,
+        generated_samples: List[Dict[str, Any]],
+    ) -> Tuple[int, List[Dict[str, Any]]]:
+        for entry in workspace_payload.get("entries") or []:
+            record = dict(entry.get("record") or {})
+            evaluation = record.get("evaluation") or {}
+            self.result_dao.insert_result(
+                {
+                    "task_id": int(record.get("task_id") or 0),
+                    "user_id": user_id,
+                    "dataset_id": dataset_id,
+                    "workspace_name": str(record.get("workspace_name") or ""),
+                    "question": str(record.get("question") or ""),
+                    "trajectory": str(record.get("trajectory") or ""),
+                    "evaluation_json": json.dumps(evaluation, ensure_ascii=False),
+                    "status": str(record.get("status") or "failed"),
+                    "error_message": record.get("error"),
+                    "model_output_audit": record.get("model_output_audit"),
+                }
+            )
+            writer.write(json.dumps(record, ensure_ascii=False) + "\n")
+            writer.flush()
+
+            dataset_record = entry.get("dataset_record")
+            if dataset_record:
+                dataset_writer.write(json.dumps(dataset_record, ensure_ascii=False) + "\n")
+                dataset_writer.flush()
+                generated_records += 1
+                if len(generated_samples) < DatasetService.SAMPLE_PREVIEW_LIMIT:
+                    generated_samples.append(dataset_record)
+        return generated_records, generated_samples
+
+    @staticmethod
+    def _normalize_parallelism(value: Any, total_items: int) -> int:
+        normalized = max(1, int(value or 1))
+        if total_items > 0:
+            normalized = min(normalized, int(total_items))
+        return min(normalized, 32)
+
+    @staticmethod
+    def _parse_llm_params_json(value: Any) -> Dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
+        text = str(value or "").strip()
+        if not text:
+            return {}
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise ValueError("llm_params_json must be a JSON object")
+        return parsed
 
     @staticmethod
     def _resolve_path(path_str: str) -> Path:
@@ -378,17 +573,144 @@ class AgenticSynthesisService:
             return [normalized_root]
         return []
 
-    @staticmethod
-    def _resolve_output_path(user_id: int, task_id: int) -> Path:
-        output_dir = PROJECT_ROOT / "output" / str(int(user_id)) / str(int(task_id))
+    def _resolve_output_path(
+        self,
+        user_id: int,
+        task_id: int,
+        *,
+        save_path: Optional[str] = None,
+        save_path_key: Optional[str] = None,
+    ) -> Path:
+        base_root = self._resolve_selected_output_root(
+            save_path=save_path,
+            save_path_key=save_path_key,
+            task_namespace="",
+        )
+        output_dir = base_root / str(int(user_id)) / str(int(task_id))
         output_dir.mkdir(parents=True, exist_ok=True)
         return (output_dir / "result.jsonl").resolve()
+
+    def _resolve_selected_output_root(
+        self,
+        *,
+        save_path: Optional[str] = None,
+        save_path_key: Optional[str],
+        task_namespace: str,
+    ) -> Path:
+        local_root = self._resolve_local_output_root(save_path=save_path)
+        if local_root is not None:
+            return local_root
+        options, default_key = self._build_output_path_options(task_namespace=task_namespace)
+        option_map = {str(item["key"]): item for item in options}
+        target_key = str(save_path_key or "").strip() or str(default_key)
+        selected = option_map.get(target_key)
+        if not selected:
+            raise ValueError(f"unknown save_path_key: {save_path_key}")
+        path = Path(str(selected["path"])).resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _resolve_local_output_root(*, save_path: Optional[str]) -> Optional[Path]:
+        raw = str(save_path or "").strip()
+        if not raw:
+            return None
+        path = Path(raw).expanduser()
+        resolved = path if path.is_absolute() else (PROJECT_ROOT / path)
+        resolved = resolved.resolve()
+        if resolved.exists() and not resolved.is_dir():
+            raise ValueError(f"save_path must be a directory: {resolved}")
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    def _build_output_path_options(self, *, task_namespace: str) -> Tuple[List[Dict[str, str]], str]:
+        raw_options = self._get_configured_output_path_options()
+        options: List[Dict[str, str]] = []
+        default_key = "default"
+        seen_keys = set()
+
+        for index, item in enumerate(raw_options):
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or f"option-{index + 1}").strip() or f"option-{index + 1}"
+            if key in seen_keys:
+                continue
+            raw_path = str(item.get("path") or "output").strip() or "output"
+            try:
+                base_root = self._resolve_output_base_path(raw_path)
+            except ValueError:
+                continue
+            target_root = (base_root / task_namespace).resolve() if str(task_namespace or "").strip() else base_root
+            try:
+                relative_path = str(target_root.relative_to(PROJECT_ROOT))
+            except ValueError:
+                continue
+            target_root.mkdir(parents=True, exist_ok=True)
+            options.append(
+                {
+                    "key": key,
+                    "label": str(item.get("label") or key).strip() or key,
+                    "path": str(target_root),
+                    "relative_path": relative_path,
+                }
+            )
+            seen_keys.add(key)
+            if item.get("default") is True:
+                default_key = key
+
+        if not options:
+            fallback_root = self._resolve_output_base_path("output")
+            target_root = (fallback_root / task_namespace).resolve() if str(task_namespace or "").strip() else fallback_root
+            target_root.mkdir(parents=True, exist_ok=True)
+            options = [
+                {
+                    "key": "default",
+                    "label": "Default Output",
+                    "path": str(target_root),
+                    "relative_path": str(target_root.relative_to(PROJECT_ROOT)),
+                }
+            ]
+            default_key = "default"
+
+        if default_key not in {str(item["key"]) for item in options}:
+            default_key = str(options[0]["key"])
+        return options, default_key
+
+    @staticmethod
+    def _get_configured_output_path_options() -> List[Dict[str, Any]]:
+        try:
+            configured = get_config("synthesis.output_paths", None)
+        except Exception:
+            configured = None
+        if isinstance(configured, list) and configured:
+            return configured
+        return list(DEFAULT_OUTPUT_PATH_OPTIONS)
+
+    @staticmethod
+    def _resolve_output_base_path(path_value: str) -> Path:
+        raw = Path(str(path_value or "").strip() or "output")
+        resolved = raw if raw.is_absolute() else (PROJECT_ROOT / raw)
+        resolved = resolved.resolve()
+        try:
+            resolved.relative_to(PROJECT_ROOT)
+        except ValueError as exc:
+            raise ValueError(f"output path must stay under project root: {path_value}") from exc
+        return resolved
 
     @staticmethod
     def _sanitize_task_payload(payload: Dict) -> Dict:
         masked = dict(payload or {})
         if "llm_api_key" in masked:
             masked["llm_api_key"] = "***"
+        return masked
+
+    def _enrich_task_payload(self, payload: Dict, user_id: int) -> Dict:
+        masked = self._sanitize_task_payload(payload)
+        generated_dataset_id = int(masked.get("generated_dataset_id") or 0)
+        if generated_dataset_id > 0:
+            dataset = self.dataset_dao.get_dataset_by_id(dataset_id=generated_dataset_id, user_id=user_id)
+            if dataset is not None:
+                masked["generated_dataset"] = dataset.to_dict()
         return masked
 
     @staticmethod
@@ -549,6 +871,7 @@ class AgenticSynthesisService:
         api_key: str,
         base_url: str,
         model_name: str,
+        llm_params: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
         required_open_count = self._required_open_question_count(DEFAULT_QUESTION_COUNT)
         system_prompt = (
@@ -579,6 +902,7 @@ class AgenticSynthesisService:
             model_name=model_name,
             system_prompt=system_prompt,
             user_payload=user_prompt,
+            llm_params=llm_params,
         )
         questions_raw: Optional[List[Any]] = None
         try:
@@ -770,6 +1094,8 @@ class AgenticSynthesisService:
         api_key: str,
         base_url: str,
         model_name: str,
+        python_executable: str,
+        llm_params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, str, Optional[str], Optional[str]]:
         system_prompt = (
             "You are an autonomous data analyst with a python execution tool. "
@@ -848,6 +1174,7 @@ class AgenticSynthesisService:
                     model_name=model_name,
                     system_prompt=system_prompt,
                     user_payload=user_prompt,
+                    llm_params=llm_params,
                 )
                 payload: Dict[str, Any] = {}
                 try:
@@ -914,7 +1241,11 @@ class AgenticSynthesisService:
                 if not code:
                     code = "print('No code generated by model for this step.')"
 
-                execute_result = self._run_python_in_sandbox(workspace_dir=workspace_dir, code=code)
+                execute_result = self._run_python_in_sandbox(
+                    workspace_dir=workspace_dir,
+                    code=code,
+                    python_executable=python_executable,
+                )
                 execute_text = self._format_execute_result(execute_result)
                 last_execute = execute_result
                 steps.append(
@@ -936,6 +1267,7 @@ class AgenticSynthesisService:
                     api_key=api_key,
                     base_url=base_url,
                     model_name=model_name,
+                    llm_params=llm_params,
                 )
                 if not final_answer:
                     final_answer = self._fallback_answer_from_steps(question=question, steps=steps)
@@ -1071,6 +1403,7 @@ class AgenticSynthesisService:
         api_key: str,
         base_url: str,
         model_name: str,
+        llm_params: Optional[Dict[str, Any]] = None,
     ) -> str:
         if not steps:
             return ""
@@ -1096,6 +1429,7 @@ class AgenticSynthesisService:
                 model_name=model_name,
                 system_prompt=system_prompt,
                 user_payload=user_payload,
+                llm_params=llm_params,
             )
             payload = self._extract_json_object(content)
             answer = str(payload.get("final_answer") or "").strip()
@@ -1179,7 +1513,13 @@ class AgenticSynthesisService:
         }
         return json.dumps(payload, ensure_ascii=False)
 
-    def _run_python_in_sandbox(self, workspace_dir: Path, code: str, timeout_seconds: int = 25) -> Dict[str, Any]:
+    def _run_python_in_sandbox(
+        self,
+        workspace_dir: Path,
+        code: str,
+        python_executable: Optional[str] = None,
+        timeout_seconds: int = 25,
+    ) -> Dict[str, Any]:
         runner_dir = workspace_dir / ".agentic_runtime"
         runner_dir.mkdir(parents=True, exist_ok=True)
         script_path = runner_dir / "sandbox_exec.py"
@@ -1213,8 +1553,9 @@ class AgenticSynthesisService:
                 env[key] = ""
 
         try:
+            resolved_python = str(Path(str(python_executable or sys.executable)).expanduser().resolve())
             proc = subprocess.run(
-                [sys.executable, "-I", str(script_path)],
+                [resolved_python, "-I", str(script_path)],
                 cwd=str(workspace_dir),
                 capture_output=True,
                 text=True,
@@ -1272,6 +1613,7 @@ class AgenticSynthesisService:
         api_key: str,
         base_url: str,
         model_name: str,
+        llm_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         system_prompt = (
             "You are a strict evaluator. Score the quality of question and trajectory. "
@@ -1299,6 +1641,7 @@ class AgenticSynthesisService:
                 model_name=model_name,
                 system_prompt=system_prompt,
                 user_payload=user_prompt,
+                llm_params=llm_params,
             )
             payload = self._extract_json_object(content)
             difficulty = int(payload.get("difficulty") or 3)
@@ -1325,16 +1668,16 @@ class AgenticSynthesisService:
         model_name: str,
         system_prompt: str,
         user_payload: Dict[str, Any],
+        llm_params: Optional[Dict[str, Any]] = None,
     ) -> str:
         endpoint = self._build_chat_endpoint(base_url)
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-            ],
-            "temperature": 0.2,
-        }
+        payload = dict(llm_params or {})
+        payload["model"] = model_name
+        payload["messages"] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ]
+        payload.setdefault("temperature", 0.2)
 
         req = urllib_request.Request(
             url=endpoint,

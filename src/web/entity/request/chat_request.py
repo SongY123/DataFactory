@@ -20,6 +20,18 @@ class ChatModelConfig(BaseModel):
     enable_thinking: bool | None = Field(default=None, description="Optional model-specific thinking flag")
 
 
+class ChatContextItem(BaseModel):
+    type: Literal["asset_file", "dataset", "trajectory_task", "distillation_task"]
+    path: str | None = Field(default=None, max_length=500)
+    ref_id: int | None = Field(default=None, ge=1)
+
+
+class AssetImportRequest(BaseModel):
+    source_type: Literal["dataset", "trajectory_task", "distillation_task"]
+    source_id: int = Field(..., ge=1)
+    target_folder_path: str = Field(default="")
+
+
 class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=8000, description="User prompt")
     request_id: str | None = Field(default=None, max_length=128, description="Conversation/session id")
@@ -38,4 +50,13 @@ class ChatRequest(BaseModel):
         default=None,
         alias="model_config",
         description="Optional per-request model override",
+    )
+    context_items: list[ChatContextItem] | None = Field(
+        default=None,
+        description="Optional platform objects or asset files to stage into the runtime workspace",
+    )
+    sandbox_environment_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional server-side Python sandbox environment id",
     )

@@ -20,6 +20,8 @@ class AgenticSynthesisTaskDAO(BaseDAO):
         llm_api_key: str,
         llm_base_url: str,
         llm_model_name: str,
+        parallelism: int,
+        llm_params_json: Optional[str],
         output_file_path: str,
         total_workspaces: int,
     ) -> AgenticSynthesisTask:
@@ -32,6 +34,8 @@ class AgenticSynthesisTaskDAO(BaseDAO):
                 llm_api_key=llm_api_key,
                 llm_base_url=llm_base_url,
                 llm_model_name=llm_model_name,
+                parallelism=int(parallelism),
+                llm_params_json=llm_params_json,
                 output_file_path=output_file_path,
                 total_workspaces=int(total_workspaces),
                 processed_workspaces=0,
@@ -75,6 +79,18 @@ class AgenticSynthesisTaskDAO(BaseDAO):
             if task is None:
                 return None
             task.output_file_path = str(output_file_path)
+            task.update_time = datetime.utcnow()
+            session.add(task)
+            session.flush()
+            session.refresh(task)
+            return task
+
+    def update_generated_dataset(self, task_id: int, generated_dataset_id: int) -> Optional[AgenticSynthesisTask]:
+        with self.session_scope() as session:
+            task = session.get(AgenticSynthesisTask, int(task_id))
+            if task is None:
+                return None
+            task.generated_dataset_id = int(generated_dataset_id)
             task.update_time = datetime.utcnow()
             session.add(task)
             session.flush()
