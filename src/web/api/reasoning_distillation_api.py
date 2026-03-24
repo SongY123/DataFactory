@@ -34,6 +34,8 @@ def start_reasoning_distillation_task(request: Request, body: ReasoningDistillat
             prompt_field=body.prompt_field,
             completion_field=body.completion_field,
             prompt=body.prompt,
+            evaluation_enabled=body.evaluation_enabled,
+            evaluation_prompt=body.evaluation_prompt,
             strategy=body.strategy,
             target_max_tokens=body.target_max_tokens,
             compression_ratio=body.compression_ratio,

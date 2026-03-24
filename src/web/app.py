@@ -38,6 +38,7 @@ from web.api import (
     dataset_router,
     reasoning_distillation_router,
     sandbox_environment_router,
+    user_preference_router,
     user_router,
 )
 
@@ -94,6 +95,7 @@ app.include_router(chat_router, prefix="/api")
 app.include_router(agentic_synthesis_router, prefix="/api")
 app.include_router(reasoning_distillation_router, prefix="/api")
 app.include_router(sandbox_environment_router, prefix="/api")
+app.include_router(user_preference_router, prefix="/api")
 app.mount('/api/generated', StaticFiles(directory=str(GENERATED_OUTPUT_DIR)), name='generated-output')
 
 

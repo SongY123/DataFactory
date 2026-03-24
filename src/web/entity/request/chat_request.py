@@ -13,6 +13,7 @@ class ChatModelConfig(BaseModel):
     provider: Literal["ollama", "openai", "dashscope"] | None = Field(default=None, description="Model provider override")
     model_name: str = Field(..., min_length=1, max_length=200, description="Target model name")
     host: str | None = Field(default=None, max_length=500, description="Local model host, used for ollama")
+    model_path: str | None = Field(default=None, max_length=2000, description="Optional local model path used for local runtime configuration")
     api_key: str | None = Field(default=None, max_length=500, description="API key for remote model providers")
     base_url: str | None = Field(default=None, max_length=500, description="Optional OpenAI-compatible base URL")
     organization: str | None = Field(default=None, max_length=200, description="Optional OpenAI organization")

@@ -24,11 +24,58 @@ from .dataset_service import DatasetService
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MAX_SOURCE_ITEMS = 200
 MAX_TEXT_CHARS = 4000
+PROMPT_PLACEHOLDER_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+EVALUATION_DIMENSIONS = (
+    "clarity",
+    "coherence",
+    "completeness",
+    "complexity",
+    "correctness",
+    "meaningfulness",
+    "difficulty",
+)
 DEFAULT_REASONING_PROMPT = (
     "Generate one training record for reasoning synthesis. "
     "The reasoning field must always be wrapped in exactly one pair of <think></think> tags. "
     "Do not add markdown fences."
 )
+DEFAULT_EVALUATION_PROMPT = """You are a single-sample quality evaluator. Based on the input below, evaluate the quality of the output relative to the ground truth.
+
+question:
+{question}
+
+output:
+{output}
+
+ground truth:
+{completion}
+
+Please score the completion on the following 7 dimensions (1-10) and provide a brief reason for each score:
+- clarity: whether the expression is clear and easy to understand
+- coherence: whether the logic is internally consistent and flows naturally
+- completeness: whether the core information is fully covered without major omissions
+- complexity: whether it demonstrates an appropriate level of reasoning depth and information structure
+- correctness: whether the content is accurate and faithful to the ground truth
+- meaningfulness: whether the output is informative, useful, and aligned with the task goal
+- difficulty: the intrinsic difficulty of this question itself
+
+Requirements:
+- Be strict and avoid inflated scoring.
+- If the output deviates from the ground truth, lower correctness and completeness accordingly.
+- Difficulty refers to the difficulty of the sample itself, not the quality of the output.
+- Return valid JSON only.
+- Do not output any extra text.
+
+JSON schema:
+{
+  "clarity": 0,
+  "coherence": 0,
+  "completeness": 0,
+  "complexity": 0,
+  "correctness": 0,
+  "meaningfulness": 0,
+  "difficulty": 0
+}"""
 
 
 class ReasoningDistillationService(AgenticSynthesisService):
@@ -62,6 +109,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
         prompt_field: Optional[str],
         completion_field: Optional[str],
         prompt: Optional[str],
+        evaluation_enabled: bool,
+        evaluation_prompt: Optional[str],
         strategy: str,
         target_max_tokens: int,
         compression_ratio: float,
@@ -101,6 +150,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "source_dataset_id": int(source_dataset_id) if source_dataset_id else None,
                 "source_task_id": int(source_task_id) if source_task_id else None,
                 "prompt_text": str(prompt or "").strip() or DEFAULT_REASONING_PROMPT,
+                "evaluation_enabled": 1 if evaluation_enabled else 0,
+                "evaluation_prompt_text": str(evaluation_prompt or "").strip() or None,
                 "strategy": str(strategy).strip(),
                 "target_max_tokens": int(target_max_tokens),
                 "compression_ratio": float(compression_ratio),
@@ -142,6 +193,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 int(user_id),
                 source_context,
                 str(prompt or "").strip() or DEFAULT_REASONING_PROMPT,
+                bool(evaluation_enabled),
+                str(evaluation_prompt or "").strip() or None,
                 str(strategy).strip(),
                 int(target_max_tokens),
                 float(compression_ratio),
@@ -190,6 +243,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
         user_id: int,
         source_context: Dict[str, Any],
         prompt: str,
+        evaluation_enabled: bool,
+        evaluation_prompt: Optional[str],
         strategy: str,
         target_max_tokens: int,
         compression_ratio: float,
@@ -227,6 +282,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
                                 source_context=source_context,
                                 source_item=item,
                                 prompt=prompt,
+                                evaluation_enabled=evaluation_enabled,
+                                evaluation_prompt=evaluation_prompt,
                                 strategy=strategy,
                                 target_max_tokens=target_max_tokens,
                                 compression_ratio=compression_ratio,
@@ -273,6 +330,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
                             source_context=source_context,
                             source_item=item,
                             prompt=prompt,
+                            evaluation_enabled=evaluation_enabled,
+                            evaluation_prompt=evaluation_prompt,
                             strategy=strategy,
                             target_max_tokens=target_max_tokens,
                             compression_ratio=compression_ratio,
@@ -315,6 +374,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "source_ref_id": source_context["source_ref_id"],
                 "source_label": source_context["source_label"],
                 "source_config": source_context.get("source_config") or {},
+                "evaluation_enabled": bool(evaluation_enabled),
+                "evaluation_prompt": str(evaluation_prompt or "").strip() or None,
                 "strategy": strategy,
                 "target_max_tokens": target_max_tokens,
                 "compression_ratio": compression_ratio,
@@ -383,6 +444,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
         source_context: Dict[str, Any],
         source_item: Dict[str, Any],
         prompt: str,
+        evaluation_enabled: bool,
+        evaluation_prompt: Optional[str],
         strategy: str,
         target_max_tokens: int,
         compression_ratio: float,
@@ -408,6 +471,23 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 llm_model_name=llm_model_name,
                 llm_params=llm_params,
             )
+            evaluation_scores = None
+            evaluation_raw_text = None
+            evaluation_error_message = None
+            if evaluation_enabled:
+                evaluation_result = self._evaluate_item(
+                    source_context=source_context,
+                    source_item=source_item,
+                    distilled=distilled,
+                    evaluation_prompt=evaluation_prompt or DEFAULT_EVALUATION_PROMPT,
+                    llm_api_key=llm_api_key,
+                    llm_base_url=llm_base_url,
+                    llm_model_name=llm_model_name,
+                    llm_params=llm_params,
+                )
+                evaluation_scores = evaluation_result["scores"]
+                evaluation_raw_text = evaluation_result["raw_text"]
+                distilled["record"]["evaluation"] = evaluation_scores
             token_count = int(distilled.get("token_count") or 0)
             return {
                 "status": "completed",
@@ -421,6 +501,9 @@ class ReasoningDistillationService(AgenticSynthesisService):
                     "reasoning_text": distilled["reasoning_text"],
                     "answer_text": distilled["answer_text"],
                     "record_json": json.dumps(distilled["record"], ensure_ascii=False),
+                    "evaluation_json": json.dumps(evaluation_scores, ensure_ascii=False) if evaluation_scores else None,
+                    "evaluation_raw_text": evaluation_raw_text,
+                    "evaluation_error_message": evaluation_error_message,
                     "token_count": token_count,
                     "status": "completed",
                     "error_message": None,
@@ -430,6 +513,10 @@ class ReasoningDistillationService(AgenticSynthesisService):
             }
         except Exception as exc:
             logger.exception("Reasoning distillation item failed. task_id=%s item=%s", task_id, source_item.get("item_key"))
+            distilled_record = locals().get("distilled")
+            failure_record = dict((distilled_record or {}).get("record") or {})
+            if failure_record:
+                failure_record["evaluation_error"] = str(exc)
             return {
                 "status": "failed",
                 "record_payload": {
@@ -438,17 +525,21 @@ class ReasoningDistillationService(AgenticSynthesisService):
                     "source_type": source_context["source_type"],
                     "source_ref_id": int(source_context["source_ref_id"]),
                     "item_key": str(source_item.get("item_key") or "item"),
-                    "prompt_text": str(source_item.get("prompt_text") or self._derive_prompt_text(source_item) or "Distillation source item"),
-                    "reasoning_text": "Distillation failed for this item.",
-                    "answer_text": "Distillation failed.",
+                    "prompt_text": str((distilled_record or {}).get("prompt_text") or source_item.get("prompt_text") or self._derive_prompt_text(source_item) or "Distillation source item"),
+                    "reasoning_text": str((distilled_record or {}).get("reasoning_text") or "Distillation failed for this item."),
+                    "answer_text": str((distilled_record or {}).get("answer_text") or "Distillation failed."),
                     "record_json": json.dumps(
-                        {
+                        failure_record
+                        or {
                             "error": str(exc),
                             "item_key": str(source_item.get("item_key") or "item"),
                             "source_path": source_item.get("source_path"),
                         },
                         ensure_ascii=False,
                     ),
+                    "evaluation_json": None,
+                    "evaluation_raw_text": None,
+                    "evaluation_error_message": str(exc),
                     "token_count": 0,
                     "status": "failed",
                     "error_message": str(exc),
@@ -900,6 +991,60 @@ class ReasoningDistillationService(AgenticSynthesisService):
             "token_count": token_count,
         }
 
+    def _evaluate_item(
+        self,
+        *,
+        source_context: Dict[str, Any],
+        source_item: Dict[str, Any],
+        distilled: Dict[str, Any],
+        evaluation_prompt: str,
+        llm_api_key: str,
+        llm_base_url: str,
+        llm_model_name: str,
+        llm_params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        record = dict(source_item.get("record") or {})
+        placeholder_values = record.get("__placeholder_values__") if isinstance(record.get("__placeholder_values__"), dict) else {}
+        evaluation_values = {
+            **placeholder_values,
+            "question": placeholder_values.get("question") or self._derive_prompt_text(source_item),
+            "output": str(distilled.get("answer_text") or "").strip(),
+            "completion": str(record.get("__mapped_completion__") or self._derive_answer_text(source_context["source_type"], record) or "").strip(),
+        }
+        render_record = {
+            **record,
+            "__placeholder_values__": evaluation_values,
+        }
+        rendered_prompt = self._render_prompt_template(evaluation_prompt or DEFAULT_EVALUATION_PROMPT, render_record).strip()
+        if not rendered_prompt:
+            raise ValueError("evaluation prompt rendered to empty content")
+
+        system_prompt = (
+            "You evaluate one generated sample. "
+            "Return exactly one JSON object with numeric scores only. "
+            "Do not add markdown fences or extra text."
+        )
+        user_payload = {
+            "evaluation_prompt": rendered_prompt,
+            "source_type": source_context["source_type"],
+            "source_label": source_context["source_label"],
+            "source_item_key": source_item["item_key"],
+        }
+        raw_text = self._chat_completion(
+            api_key=llm_api_key,
+            base_url=llm_base_url,
+            model_name=llm_model_name,
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            llm_params=llm_params,
+        )
+        parsed = self._extract_json_object(raw_text)
+        scores = self._normalize_evaluation_scores(parsed)
+        return {
+            "scores": scores,
+            "raw_text": str(raw_text or ""),
+        }
+
     @staticmethod
     def _derive_messages(source_type: str, record: Any) -> List[Dict[str, str]]:
         if source_type == "trajectory_task":
@@ -1114,6 +1259,22 @@ class ReasoningDistillationService(AgenticSynthesisService):
         return f"<think>{text}</think>"
 
     @staticmethod
+    def _normalize_evaluation_scores(value: Any) -> Dict[str, float]:
+        if not isinstance(value, dict):
+            raise ValueError("evaluation result must be a JSON object")
+        scores: Dict[str, float] = {}
+        for key in EVALUATION_DIMENSIONS:
+            raw = value.get(key)
+            if raw is None or str(raw).strip() == "":
+                raise ValueError(f"evaluation score is missing: {key}")
+            try:
+                numeric = float(raw)
+            except Exception as exc:
+                raise ValueError(f"evaluation score is invalid: {key}") from exc
+            scores[key] = max(0.0, min(10.0, round(numeric, 2)))
+        return scores
+
+    @staticmethod
     def _render_prompt_template(template: Optional[str], record: Any) -> str:
         prompt_template = str(template or "").strip()
         if not prompt_template:
@@ -1128,10 +1289,12 @@ class ReasoningDistillationService(AgenticSynthesisService):
         def replace(match: re.Match[str]) -> str:
             key = str(match.group(1) or "").strip()
             if not key:
-                return ""
+                return match.group(0)
+            if not PROMPT_PLACEHOLDER_NAME_PATTERN.fullmatch(key):
+                return match.group(0)
             value = placeholder_values.get(key)
             if value is None:
-                return ""
+                return match.group(0)
             return str(value)
 
         return re.sub(r"\{([^{}]+)\}", replace, prompt_template)

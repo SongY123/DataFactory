@@ -54,6 +54,8 @@ class ReasoningDistillationStartRequest(BaseModel):
     prompt_field: Optional[str] = Field(default=None, max_length=256)
     completion_field: Optional[str] = Field(default=None, max_length=256)
     prompt: Optional[str] = Field(default=None, max_length=12000)
+    evaluation_enabled: bool = Field(default=False)
+    evaluation_prompt: Optional[str] = Field(default=None, max_length=12000)
     strategy: str = Field(..., min_length=1, max_length=64)
     target_max_tokens: int = Field(default=1024, ge=1)
     compression_ratio: float = Field(default=0.5, gt=0, le=1)
@@ -75,7 +77,7 @@ class ReasoningDistillationStartRequest(BaseModel):
             raise ValueError("field must not be empty")
         return normalized
 
-    @field_validator("prompt", "save_path", "save_path_key", "llm_params_json", "prompt_field", "completion_field")
+    @field_validator("prompt", "evaluation_prompt", "save_path", "save_path_key", "llm_params_json", "prompt_field", "completion_field")
     @classmethod
     def _normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -122,4 +124,6 @@ class ReasoningDistillationStartRequest(BaseModel):
             if self.source_task_id is None:
                 raise ValueError("source_task_id is required when source_type=trajectory_task")
             self.source_dataset_id = None
+        if self.evaluation_enabled and not self.evaluation_prompt:
+            raise ValueError("evaluation_prompt is required when evaluation_enabled=true")
         return self

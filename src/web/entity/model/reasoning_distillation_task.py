@@ -26,6 +26,8 @@ class ReasoningDistillationTask(Base):
     source_dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True, index=True)
     source_task_id = Column(Integer, ForeignKey("agentic_synthesis_tasks.id"), nullable=True, index=True)
     prompt_text = Column(Text, nullable=True)
+    evaluation_enabled = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    evaluation_prompt_text = Column(Text, nullable=True)
     strategy = Column(String(64), nullable=False)
     target_max_tokens = Column(Integer, nullable=False, default=1024, server_default=text("1024"))
     compression_ratio = Column(Float, nullable=False, default=0.5, server_default=text("0.5"))
@@ -85,6 +87,8 @@ class ReasoningDistillationTask(Base):
             "source_dataset_id": self.source_dataset_id,
             "source_task_id": self.source_task_id,
             "prompt_text": self.prompt_text,
+            "evaluation_enabled": bool(self.evaluation_enabled),
+            "evaluation_prompt_text": self.evaluation_prompt_text,
             "strategy": self.strategy,
             "target_max_tokens": self.target_max_tokens,
             "compression_ratio": self.compression_ratio,

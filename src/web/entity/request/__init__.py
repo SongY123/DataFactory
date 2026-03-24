@@ -10,6 +10,7 @@ from .dataset_request import (
     HuggingFaceDatasetImportRequest,
 )
 from .reasoning_distillation_request import ReasoningDistillationStartRequest
+from .user_preference_request import UserPreferenceUpdateRequest
 from .user_request import UserCreateRequest, UserUpdateRequest
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "AgenticSynthesisStartRequest",
     "AgenticSynthesisTaskQueryRequest",
     "ReasoningDistillationStartRequest",
+    "UserPreferenceUpdateRequest",
 ]
