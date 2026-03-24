@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -56,6 +57,10 @@ class ReasoningDistillationService(AgenticSynthesisService):
         source_type: str,
         source_dataset_id: Optional[int],
         source_task_id: Optional[int],
+        selected_file_paths: Optional[List[str]],
+        file_mappings: Optional[List[Dict[str, Any]]],
+        prompt_field: Optional[str],
+        completion_field: Optional[str],
         prompt: Optional[str],
         strategy: str,
         target_max_tokens: int,
@@ -70,11 +75,18 @@ class ReasoningDistillationService(AgenticSynthesisService):
         save_path_key: Optional[str] = None,
         llm_params_json: Optional[str] = None,
     ) -> Dict:
+        source_config = self._normalize_dataset_source_config(
+            selected_file_paths=selected_file_paths,
+            file_mappings=file_mappings,
+            prompt_field=prompt_field,
+            completion_field=completion_field,
+        )
         source_context = self._build_source_context(
             user_id=user_id,
             source_type=source_type,
             source_dataset_id=source_dataset_id,
             source_task_id=source_task_id,
+            source_config=source_config,
         )
         source_items = source_context["items"]
         if not source_items:
@@ -287,6 +299,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "source_type": source_context["source_type"],
                 "source_ref_id": source_context["source_ref_id"],
                 "source_label": source_context["source_label"],
+                "source_config": source_context.get("source_config") or {},
                 "strategy": strategy,
                 "target_max_tokens": target_max_tokens,
                 "compression_ratio": compression_ratio,
@@ -459,14 +472,21 @@ class ReasoningDistillationService(AgenticSynthesisService):
         source_type: str,
         source_dataset_id: Optional[int],
         source_task_id: Optional[int],
+        source_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         normalized_type = str(source_type or "").strip().lower()
+        normalized_source_config = dict(source_config or {})
         if normalized_type == "dataset":
             dataset = self.dataset_dao.get_dataset_by_id(dataset_id=int(source_dataset_id or 0), user_id=user_id)
             if dataset is None:
                 raise ValueError("source dataset not found")
             dataset_row = dataset.to_dict(include_internal=True)
-            items = self._load_dataset_source_items(dataset_row)
+            items = self._load_dataset_source_items(
+                user_id=user_id,
+                dataset_id=int(dataset.id),
+                dataset_row=dataset_row,
+                source_config=normalized_source_config,
+            )
             return {
                 "source_type": "dataset",
                 "source_ref_id": int(dataset.id),
@@ -475,6 +495,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "origin_dataset_id": int(dataset.id),
                 "origin_task_type": None,
                 "origin_task_id": None,
+                "source_config": normalized_source_config,
                 "items": items,
             }
 
@@ -495,12 +516,75 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "origin_dataset_id": int(task.generated_dataset_id or task.dataset_id or 0) or None,
                 "origin_task_type": "trajectory_task",
                 "origin_task_id": int(task.id),
+                "source_config": {},
                 "items": items,
             }
 
         raise ValueError(f"unsupported source_type: {source_type}")
 
-    def _load_dataset_source_items(self, dataset_row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _load_dataset_source_items(
+        self,
+        *,
+        user_id: int,
+        dataset_id: int,
+        dataset_row: Dict[str, Any],
+        source_config: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        normalized_source_config = dict(source_config or {})
+        selected_file_paths = [
+            str(item or "").strip()
+            for item in (normalized_source_config.get("selected_file_paths") or [])
+            if str(item or "").strip()
+        ]
+        default_completion_field = str(normalized_source_config.get("completion_field") or "").strip() or None
+        file_mapping_by_path = dict(normalized_source_config.get("file_mapping_by_path") or {})
+
+        files_payload = self.dataset_service.get_dataset_files(user_id=user_id, dataset_id=dataset_id) or {}
+        data_files = files_payload.get("data_files") or []
+        available_paths = [str(item.get("path") or "").strip() for item in data_files if str(item.get("path") or "").strip()]
+
+        if selected_file_paths:
+            invalid_paths = [path for path in selected_file_paths if path not in available_paths]
+            if invalid_paths:
+                raise ValueError(f"selected dataset files not found: {', '.join(invalid_paths[:3])}")
+            candidate_paths = selected_file_paths
+        else:
+            candidate_paths = available_paths
+
+        items: List[Dict[str, Any]] = []
+        for relative_path in candidate_paths:
+            if len(items) >= MAX_SOURCE_ITEMS:
+                break
+            file_mapping = file_mapping_by_path.get(relative_path) or {}
+            completion_field = str(file_mapping.get("completion_field") or default_completion_field or "").strip() or None
+            placeholder_mappings = {
+                str(key or "").strip(): str(value or "").strip()
+                for key, value in (file_mapping.get("placeholder_mappings") or {}).items()
+                if str(key or "").strip() and str(value or "").strip()
+            }
+            preview = self.dataset_service.get_dataset_preview(
+                user_id=user_id,
+                dataset_id=dataset_id,
+                path=relative_path,
+                limit=max(1, min(100, MAX_SOURCE_ITEMS - len(items))),
+                _row_override=dataset_row,
+            )
+            for index, row in enumerate(preview.get("rows") or []):
+                if len(items) >= MAX_SOURCE_ITEMS:
+                    break
+                item = self._make_dataset_item(
+                    record=row,
+                    source_path=relative_path,
+                    row_index=index,
+                    placeholder_mappings=placeholder_mappings,
+                    completion_field=completion_field,
+                )
+                if item:
+                    items.append(item)
+
+        if items:
+            return items
+
         file_path = str(dataset_row.get("file_path") or "").strip()
         if not file_path:
             fallback_rows = dataset_row.get("sample_data")
@@ -510,7 +594,18 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 except Exception:
                     fallback_rows = []
             rows = fallback_rows if isinstance(fallback_rows, list) else []
-            return [self._make_dataset_item(record=row, source_path="sample_data", row_index=index) for index, row in enumerate(rows[:MAX_SOURCE_ITEMS])]
+            fallback_items: List[Dict[str, Any]] = []
+            for index, row in enumerate(rows[:MAX_SOURCE_ITEMS]):
+                item = self._make_dataset_item(
+                    record=row,
+                    source_path="sample_data",
+                    row_index=index,
+                    placeholder_mappings={},
+                    completion_field=default_completion_field,
+                )
+                if item:
+                    fallback_items.append(item)
+            return fallback_items
 
         root = Path(file_path)
         if not root.exists():
@@ -526,24 +621,60 @@ class ReasoningDistillationService(AgenticSynthesisService):
         for file in files:
             if len(items) >= MAX_SOURCE_ITEMS:
                 break
-            items.extend(self._parse_dataset_file_to_items(file, limit=MAX_SOURCE_ITEMS - len(items)))
+            items.extend(
+                self._parse_dataset_file_to_items(
+                    file,
+                    limit=MAX_SOURCE_ITEMS - len(items),
+                    placeholder_mappings={},
+                    completion_field=default_completion_field,
+                )
+            )
         return items[:MAX_SOURCE_ITEMS]
 
-    def _parse_dataset_file_to_items(self, file: Path, limit: int) -> List[Dict[str, Any]]:
+    def _parse_dataset_file_to_items(
+        self,
+        file: Path,
+        limit: int,
+        *,
+        placeholder_mappings: Optional[Dict[str, str]] = None,
+        completion_field: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         suffix = file.suffix.lower()
         if limit <= 0:
             return []
         if suffix == ".csv":
             text = file.read_text(encoding="utf-8", errors="ignore")
             reader = csv.DictReader(io.StringIO(text))
-            return [self._make_dataset_item(record=row, source_path=str(file), row_index=index) for index, row in zip(range(limit), reader)]
+            rows: List[Dict[str, Any]] = []
+            for index, row in zip(range(limit), reader):
+                item = self._make_dataset_item(
+                    record=row,
+                    source_path=str(file),
+                    row_index=index,
+                    placeholder_mappings=placeholder_mappings,
+                    completion_field=completion_field,
+                )
+                if item:
+                    rows.append(item)
+            return rows
         if suffix == ".json":
             text = file.read_text(encoding="utf-8", errors="ignore").strip()
             if not text:
                 return []
             parsed = json.loads(text)
             rows = parsed if isinstance(parsed, list) else [parsed]
-            return [self._make_dataset_item(record=row, source_path=str(file), row_index=index) for index, row in enumerate(rows[:limit])]
+            items: List[Dict[str, Any]] = []
+            for index, row in enumerate(rows[:limit]):
+                item = self._make_dataset_item(
+                    record=row,
+                    source_path=str(file),
+                    row_index=index,
+                    placeholder_mappings=placeholder_mappings,
+                    completion_field=completion_field,
+                )
+                if item:
+                    items.append(item)
+            return items
         if suffix == ".jsonl":
             rows: List[Dict[str, Any]] = []
             for index, line in enumerate(file.read_text(encoding="utf-8", errors="ignore").splitlines()):
@@ -556,7 +687,15 @@ class ReasoningDistillationService(AgenticSynthesisService):
                     parsed = json.loads(text)
                 except Exception:
                     parsed = {"text": text}
-                rows.append(self._make_dataset_item(record=parsed, source_path=str(file), row_index=index))
+                item = self._make_dataset_item(
+                    record=parsed,
+                    source_path=str(file),
+                    row_index=index,
+                    placeholder_mappings=placeholder_mappings,
+                    completion_field=completion_field,
+                )
+                if item:
+                    rows.append(item)
             return rows
         if suffix in {".txt", ".md"}:
             rows: List[Dict[str, Any]] = []
@@ -566,18 +705,62 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 text = line.strip()
                 if not text:
                     continue
-                rows.append(self._make_dataset_item(record={"text": text}, source_path=str(file), row_index=index))
+                item = self._make_dataset_item(
+                    record={"text": text},
+                    source_path=str(file),
+                    row_index=index,
+                    placeholder_mappings=placeholder_mappings,
+                    completion_field=completion_field,
+                )
+                if item:
+                    rows.append(item)
             return rows
         return []
 
     @staticmethod
-    def _make_dataset_item(record: Any, source_path: str, row_index: int) -> Dict[str, Any]:
-        prompt_text = ReasoningDistillationService._derive_prompt_text({"record": record}) or f"Dataset item {row_index + 1}"
+    def _make_dataset_item(
+        record: Any,
+        source_path: str,
+        row_index: int,
+        *,
+        placeholder_mappings: Optional[Dict[str, str]] = None,
+        completion_field: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_record = record if isinstance(record, dict) else {"value": record}
+        normalized_placeholder_mappings = {
+            str(key or "").strip(): str(value or "").strip()
+            for key, value in (placeholder_mappings or {}).items()
+            if str(key or "").strip() and str(value or "").strip()
+        }
+        placeholder_values = {
+            placeholder: ReasoningDistillationService._extract_record_field_text(normalized_record, field_name)
+            for placeholder, field_name in normalized_placeholder_mappings.items()
+        }
+        completion_value = ReasoningDistillationService._extract_record_field_text(normalized_record, completion_field)
+
+        if normalized_placeholder_mappings and any(not value for value in placeholder_values.values()):
+            return None
+        if completion_field and not completion_value:
+            return None
+
+        working_record = dict(normalized_record)
+        if placeholder_values:
+            working_record["__placeholder_values__"] = placeholder_values
+        if completion_value:
+            working_record["__mapped_completion__"] = completion_value
+        if normalized_placeholder_mappings or completion_field:
+            working_record["__field_mapping__"] = {
+                "placeholder_mappings": normalized_placeholder_mappings,
+                "completion_field": completion_field,
+            }
+
         return {
             "item_key": f"{Path(str(source_path)).name}:{row_index + 1}",
             "source_path": str(source_path),
-            "record": record if isinstance(record, dict) else {"value": record},
-            "prompt_text": prompt_text,
+            "record": working_record,
+            "prompt_text": ReasoningDistillationService._derive_prompt_text({"record": working_record}) or f"Dataset item {row_index + 1}",
+            "placeholder_mappings": normalized_placeholder_mappings,
+            "completion_field": completion_field,
         }
 
     @staticmethod
@@ -611,6 +794,16 @@ class ReasoningDistillationService(AgenticSynthesisService):
         llm_model_name: str,
         llm_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        rendered_prompt = self._render_prompt_template(prompt, source_item["record"])
+        if rendered_prompt:
+            source_item = {
+                **source_item,
+                "record": {
+                    **dict(source_item.get("record") or {}),
+                    "__rendered_prompt__": rendered_prompt,
+                },
+                "prompt_text": rendered_prompt,
+            }
         base_messages = self._derive_messages(source_context["source_type"], source_item["record"])
         answer_seed = self._derive_answer_text(source_context["source_type"], source_item["record"])
         system_prompt = (
@@ -621,7 +814,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
             "Do not include markdown fences or extra keys."
         )
         user_payload = {
-            "prompt": str(prompt or "").strip() or DEFAULT_REASONING_PROMPT,
+            "prompt": rendered_prompt or str(prompt or "").strip() or DEFAULT_REASONING_PROMPT,
             "source_type": source_context["source_type"],
             "strategy": strategy,
             "target_max_tokens": target_max_tokens,
@@ -667,6 +860,8 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 "source_label": source_context["source_label"],
                 "item_key": source_item["item_key"],
                 "source_path": source_item.get("source_path"),
+                "placeholder_mappings": source_item.get("placeholder_mappings") or {},
+                "completion_field": source_item.get("completion_field"),
                 "strategy": strategy,
                 "target_max_tokens": target_max_tokens,
                 "compression_ratio": compression_ratio,
@@ -691,6 +886,9 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 return [{"role": "user", "content": question}]
 
         if isinstance(record, dict):
+            rendered_prompt = str(record.get("__rendered_prompt__") or "").strip()
+            if rendered_prompt:
+                return [{"role": "user", "content": rendered_prompt[:MAX_TEXT_CHARS]}]
             raw_messages = record.get("messages")
             if isinstance(raw_messages, list) and raw_messages:
                 normalized_messages = []
@@ -721,6 +919,9 @@ class ReasoningDistillationService(AgenticSynthesisService):
             return extracted[:MAX_TEXT_CHARS]
 
         if isinstance(record, dict):
+            mapped_completion = str(record.get("__mapped_completion__") or "").strip()
+            if mapped_completion:
+                return mapped_completion[:MAX_TEXT_CHARS]
             for key in ("answer", "response", "output", "assistant", "target", "label"):
                 value = str(record.get(key) or "").strip()
                 if value:
@@ -731,6 +932,9 @@ class ReasoningDistillationService(AgenticSynthesisService):
     def _derive_prompt_text(source_item: Dict[str, Any]) -> str:
         record = source_item.get("record") if isinstance(source_item, dict) else source_item
         if isinstance(record, dict):
+            rendered_prompt = str(record.get("__rendered_prompt__") or "").strip()
+            if rendered_prompt:
+                return rendered_prompt[:MAX_TEXT_CHARS]
             for key in ("question", "prompt", "instruction", "input", "query", "user", "text"):
                 value = str(record.get(key) or "").strip()
                 if value:
@@ -824,6 +1028,61 @@ class ReasoningDistillationService(AgenticSynthesisService):
         return f"{source_label} Reasoning Distilled T{task_id}"
 
     @staticmethod
+    def _normalize_dataset_source_config(
+        *,
+        selected_file_paths: Optional[List[str]],
+        file_mappings: Optional[List[Dict[str, Any]]],
+        prompt_field: Optional[str],
+        completion_field: Optional[str],
+    ) -> Dict[str, Any]:
+        normalized_paths = []
+        seen = set()
+        for item in selected_file_paths or []:
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized_paths.append(text)
+        mapping_by_path: Dict[str, Dict[str, Any]] = {}
+        for item in file_mappings or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            if not path:
+                continue
+            placeholder_mappings = {
+                str(key or "").strip(): str(value or "").strip()
+                for key, value in (item.get("placeholder_mappings") or {}).items()
+                if str(key or "").strip() and str(value or "").strip()
+            }
+            mapping_by_path[path] = {
+                "placeholder_mappings": placeholder_mappings,
+                "prompt_field": str(item.get("prompt_field") or "").strip() or None,
+                "completion_field": str(item.get("completion_field") or "").strip() or None,
+            }
+        return {
+            "selected_file_paths": normalized_paths,
+            "file_mapping_by_path": mapping_by_path,
+            "prompt_field": str(prompt_field or "").strip() or None,
+            "completion_field": str(completion_field or "").strip() or None,
+        }
+
+    @staticmethod
+    def _extract_record_field_text(record: Dict[str, Any], field_name: Optional[str]) -> str:
+        key = str(field_name or "").strip()
+        if not key or not isinstance(record, dict) or key not in record:
+            return ""
+        value = record.get(key)
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()[:MAX_TEXT_CHARS]
+        try:
+            return json.dumps(value, ensure_ascii=False)[:MAX_TEXT_CHARS]
+        except Exception:
+            return str(value).strip()[:MAX_TEXT_CHARS]
+
+    @staticmethod
     def _ensure_think_tags(value: str) -> str:
         text = str(value or "").strip()
         if not text:
@@ -831,3 +1090,26 @@ class ReasoningDistillationService(AgenticSynthesisService):
         if text.startswith("<think>") and text.endswith("</think>"):
             return text
         return f"<think>{text}</think>"
+
+    @staticmethod
+    def _render_prompt_template(template: Optional[str], record: Any) -> str:
+        prompt_template = str(template or "").strip()
+        if not prompt_template:
+            return ""
+        if not isinstance(record, dict):
+            return prompt_template
+
+        placeholder_values = record.get("__placeholder_values__") if isinstance(record.get("__placeholder_values__"), dict) else {}
+        if not placeholder_values:
+            return prompt_template
+
+        def replace(match: re.Match[str]) -> str:
+            key = str(match.group(1) or "").strip()
+            if not key:
+                return ""
+            value = placeholder_values.get(key)
+            if value is None:
+                return ""
+            return str(value)
+
+        return re.sub(r"\{([^{}]+)\}", replace, prompt_template)

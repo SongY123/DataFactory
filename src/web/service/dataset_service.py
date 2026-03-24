@@ -295,6 +295,11 @@ class DatasetService:
                 value = value.item()
             except Exception:
                 pass
+        if hasattr(value, "as_py") and callable(getattr(value, "as_py")):
+            try:
+                value = value.as_py()
+            except Exception:
+                pass
         if isinstance(value, (datetime, date)):
             return value.isoformat()
         if isinstance(value, bytes):
@@ -304,6 +309,13 @@ class DatasetService:
                 return None
         except Exception:
             pass
+        if hasattr(value, "tolist") and not isinstance(value, (str, bytes, bytearray, list, tuple, set, dict)):
+            try:
+                converted = value.tolist()
+            except Exception:
+                converted = value
+            if converted is not value:
+                return DatasetService._normalize_scalar(converted)
         if isinstance(value, (list, tuple, set)):
             return [DatasetService._normalize_scalar(item) for item in value]
         if isinstance(value, dict):
@@ -1149,7 +1161,7 @@ class DatasetService:
 
         hf_meta = self._extract_hf_metadata(info)
         dataset_name = self._normalize_text(name) or self._normalize_text(hf_meta.get("pretty_name")) or clean_repo_id.split("/")[-1]
-        description = self._normalize_text(note) or self._normalize_text(hf_meta.get("description"))
+        description = self._normalize_text(note)
         language_tags = self._normalize_language_tags(hf_meta.get("language_tags"), None)
         language = self._primary_language_from_tags(language_tags, "multi")
 
