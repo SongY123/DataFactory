@@ -206,6 +206,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
         processed_items = 0
         distilled_samples = 0
         token_total = 0
+        first_failure_message: Optional[str] = None
         sample_records: List[Dict[str, Any]] = []
         effective_parallelism = self._normalize_parallelism(parallelism, len(source_items))
 
@@ -250,6 +251,13 @@ class ReasoningDistillationService(AgenticSynthesisService):
                                 dataset_writer=dataset_writer,
                                 sample_records=sample_records,
                             )
+                            if (
+                                first_failure_message is None
+                                and str(item_result.get("status") or "").lower() == "failed"
+                            ):
+                                first_failure_message = str(
+                                    (item_result.get("record_payload") or {}).get("error_message") or ""
+                                ).strip() or None
                             avg_tokens = int(token_total / distilled_samples) if distilled_samples else 0
                             self.distillation_task_dao.update_progress(
                                 task_id,
@@ -285,6 +293,13 @@ class ReasoningDistillationService(AgenticSynthesisService):
                             dataset_writer=dataset_writer,
                             sample_records=sample_records,
                         )
+                        if (
+                            first_failure_message is None
+                            and str(item_result.get("status") or "").lower() == "failed"
+                        ):
+                            first_failure_message = str(
+                                (item_result.get("record_payload") or {}).get("error_message") or ""
+                            ).strip() or None
                         avg_tokens = int(token_total / distilled_samples) if distilled_samples else 0
                         self.distillation_task_dao.update_progress(
                             task_id,
@@ -337,7 +352,7 @@ class ReasoningDistillationService(AgenticSynthesisService):
                 )
                 self.distillation_task_dao.update_generated_dataset(task_id, int(generated["id"]))
             else:
-                error_message = "no reasoning samples were generated"
+                error_message = first_failure_message or "no reasoning samples were generated"
 
             self.distillation_task_dao.mark_finished(
                 task_id,
@@ -425,8 +440,15 @@ class ReasoningDistillationService(AgenticSynthesisService):
                     "item_key": str(source_item.get("item_key") or "item"),
                     "prompt_text": str(source_item.get("prompt_text") or self._derive_prompt_text(source_item) or "Distillation source item"),
                     "reasoning_text": "Distillation failed for this item.",
-                    "answer_text": "",
-                    "record_json": json.dumps({}, ensure_ascii=False),
+                    "answer_text": "Distillation failed.",
+                    "record_json": json.dumps(
+                        {
+                            "error": str(exc),
+                            "item_key": str(source_item.get("item_key") or "item"),
+                            "source_path": source_item.get("source_path"),
+                        },
+                        ensure_ascii=False,
+                    ),
                     "token_count": 0,
                     "status": "failed",
                     "error_message": str(exc),

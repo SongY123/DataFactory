@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib import request as urllib_request
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from ..dao import AgenticSynthesisResultDAO, AgenticSynthesisTaskDAO
 from ..dao.dataset_dao import DatasetDAO
@@ -1784,6 +1784,11 @@ class AgenticSynthesisService:
         try:
             with urllib_request.urlopen(req, timeout=180) as resp:
                 body = resp.read().decode("utf-8", errors="ignore")
+        except HTTPError as exc:
+            detail = self._extract_http_error_detail(exc)
+            status = int(getattr(exc, "code", 0) or 0)
+            base = f"llm request failed with HTTP {status} at {endpoint}"
+            raise RuntimeError(f"{base}: {detail}" if detail else base) from exc
         except URLError as exc:
             raise RuntimeError(f"llm request failed: {exc}") from exc
 
@@ -1811,6 +1816,35 @@ class AgenticSynthesisService:
         if normalized.endswith("/v1"):
             return f"{normalized}/chat/completions"
         return f"{normalized}/v1/chat/completions"
+
+    @staticmethod
+    def _extract_http_error_detail(exc: HTTPError) -> str:
+        try:
+            raw = exc.read().decode("utf-8", errors="ignore").strip()
+        except Exception:
+            raw = ""
+
+        if not raw:
+            return str(exc.reason or "").strip()
+
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return raw[:400]
+
+        if isinstance(parsed, dict):
+            err = parsed.get("error")
+            if isinstance(err, dict):
+                for key in ("message", "detail", "msg", "error", "code"):
+                    value = err.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()[:400]
+            for key in ("detail", "message", "error", "msg", "code"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()[:400]
+
+        return raw[:400]
 
     @staticmethod
     def _extract_json_object(text: str) -> Dict[str, Any]:

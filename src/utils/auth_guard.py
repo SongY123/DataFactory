@@ -20,9 +20,9 @@ def _get_session_service():
     return get_global_session_service()
 
 
-def _is_auto_login_as_admin_enabled() -> bool:
+def _is_auto_login_as_user_enabled() -> bool:
     try:
-        raw = get_config("auth.auto_login_as_admin", False)
+        raw = get_config("auth.auto_login_as_user", False)
     except Exception:
         return False
 
@@ -73,7 +73,7 @@ def _resolve_auto_login_payload() -> Dict[str, Any]:
         # Delay import to avoid unnecessary dependency initialization at module import time.
         from web.service.user_service import UserService
 
-        login_data = UserService().login(username="admin", password="admin")
+        login_data = UserService().login(username="user", password="user")
         session_id = str(login_data.get("session_id") or "").strip()
         if not session_id:
             raise RuntimeError("auto login failed to create a session id")
@@ -95,7 +95,7 @@ def _get_auto_login_user() -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Auto login as admin failed: {exc}",
+            detail=f"Auto login as user failed: {exc}",
         )
 
 
@@ -107,7 +107,7 @@ def get_login_user(request: Request) -> Dict[str, Any]:
         if payload:
             return _normalize_login_user(payload, session_id)
 
-    if _is_auto_login_as_admin_enabled():
+    if _is_auto_login_as_user_enabled():
         return _get_auto_login_user()
 
     raise HTTPException(status_code=401, detail="Not logged in.")
