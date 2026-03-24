@@ -131,6 +131,8 @@ class SandboxEnvironmentService:
                 "default_id": default_id,
                 "items": normalized_items,
             }
+            if self._sync_default_environment(payload):
+                self._write_payload(payload)
             return payload
 
     def _write_payload(self, payload: Dict[str, Any]) -> None:
@@ -152,7 +154,7 @@ class SandboxEnvironmentService:
 
     def _default_payload(self) -> Dict[str, Any]:
         now = self._now_iso()
-        default_python = str(Path(sys.executable).resolve())
+        default_python = self._current_python_path()
         item = {
             "id": "env-default",
             "name": "Default Python",
@@ -164,6 +166,26 @@ class SandboxEnvironmentService:
             "default_id": item["id"],
             "items": [item],
         }
+
+    def _sync_default_environment(self, payload: Dict[str, Any]) -> bool:
+        current_python = self._current_python_path()
+        now = self._now_iso()
+        changed = False
+
+        for item in payload.get("items") or []:
+            if str(item.get("id") or "").strip() != "env-default":
+                continue
+            if str(item.get("name") or "").strip() != "Default Python":
+                item["name"] = "Default Python"
+                changed = True
+            if str(item.get("python_path") or "").strip() != current_python:
+                item["python_path"] = current_python
+                changed = True
+            if changed:
+                item["updated_at"] = now
+            break
+
+        return changed
 
     def _normalize_items(self, items: List[Any]) -> List[Dict[str, str]]:
         normalized: List[Dict[str, str]] = []
@@ -215,6 +237,10 @@ class SandboxEnvironmentService:
         if not os.access(str(resolved), os.X_OK):
             raise ValueError(f"Python executable is not runnable: {resolved}")
         return str(resolved)
+
+    @staticmethod
+    def _current_python_path() -> str:
+        return str(Path(sys.executable).resolve())
 
     @staticmethod
     def _now_iso() -> str:
