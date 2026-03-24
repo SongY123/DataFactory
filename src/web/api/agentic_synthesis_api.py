@@ -24,9 +24,9 @@ def _ok(data=None, message: str = "ok"):
 def start_agentic_synthesis_task(request: Request, body: AgenticSynthesisStartRequest):
     try:
         user_id = assert_login(request)
-        data = _service.start_task(
+        data = _service.start_tasks(
             user_id=user_id,
-            dataset_id=body.dataset_id,
+            dataset_ids=body.dataset_ids,
             prompt=body.prompt,
             action_tags=body.action_tags,
             llm_api_key=body.llm_api_key,
@@ -38,7 +38,7 @@ def start_agentic_synthesis_task(request: Request, body: AgenticSynthesisStartRe
             sandbox_environment_id=body.sandbox_environment_id,
             llm_params_json=body.llm_params_json,
         )
-        return _ok(data=data, message="agentic synthesis task started")
+        return _ok(data=data, message="agentic synthesis tasks started")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
