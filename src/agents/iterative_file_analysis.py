@@ -237,7 +237,7 @@ class IterativeFileAnalyzer:
         self.parser = AgentFileParser()
         self.model = create_model(stream=False)
         self.streaming_text_model = create_model(stream=True)
-        self.max_rounds = max(1, int(get_config("agent.single_file.max_rounds", 10) or 10))
+        self.max_rounds = max(1, int(get_config("agent.single_file.max_rounds", 4) or 4))
         self.execution_timeout_seconds = max(
             5,
             int(get_config("agent.single_file.execution_timeout_seconds", 45) or 45),
