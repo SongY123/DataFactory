@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import csv
 import re
 import shutil
 from datetime import datetime
@@ -18,6 +19,7 @@ _ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xlsm", ".json", ".jsonl"}
 _ALLOWED_ARTIFACT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
 _INVALID_PATH_CHARS = set('<>:"|?*\0')
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_PREVIEWABLE_ASSET_EXTENSIONS = {".csv"}
 
 
 class AgentAssetService:
@@ -217,6 +219,69 @@ class AgentAssetService:
             raise ValueError("Target path is not a file.")
         target.unlink()
         return True
+
+    def preview_file_page(self, user_id: int, path: str, *, page: int = 1, page_size: int = 200) -> Dict[str, Any]:
+        root = self.asset_root(user_id)
+        normalized = self._normalize_relative_path(path, allow_empty=False)
+        target = self._resolve_under(root, normalized)
+        if not target.exists():
+            raise ValueError("File does not exist.")
+        if not target.is_file():
+            raise ValueError("Target path is not a file.")
+
+        suffix = target.suffix.lower()
+        if suffix not in _PREVIEWABLE_ASSET_EXTENSIONS:
+            raise ValueError(f"Preview is only supported for: {', '.join(sorted(_PREVIEWABLE_ASSET_EXTENSIONS))}")
+
+        normalized_page_size = max(1, min(200, int(page_size or 200)))
+        normalized_page = max(1, int(page or 1))
+        offset = (normalized_page - 1) * normalized_page_size
+
+        with target.open("r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+            sample = handle.read(8192)
+            handle.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+            except Exception:
+                dialect = csv.excel
+
+            reader = csv.DictReader(handle, dialect=dialect)
+            fieldnames = [str(name or "").strip() for name in (reader.fieldnames or []) if str(name or "").strip()]
+            if not fieldnames:
+                raise ValueError("CSV file does not contain a header row.")
+
+            rows: list[dict[str, str]] = []
+            total_rows = 0
+            for raw_row in reader:
+                if raw_row is None:
+                    continue
+                if total_rows >= offset and len(rows) < normalized_page_size:
+                    rows.append({
+                        column: str(raw_row.get(column, "") if raw_row.get(column, "") is not None else "")
+                        for column in fieldnames
+                    })
+                total_rows += 1
+
+        total_pages = max(1, (total_rows + normalized_page_size - 1) // normalized_page_size) if total_rows else 1
+        effective_page = min(normalized_page, total_pages)
+        if effective_page != normalized_page:
+            return self.preview_file_page(user_id, path, page=effective_page, page_size=normalized_page_size)
+
+        start_row = offset + 1 if total_rows and rows else 0
+        end_row = offset + len(rows)
+        return {
+            "path": normalized,
+            "file_name": target.name,
+            "columns": fieldnames,
+            "rows": rows,
+            "page": effective_page,
+            "page_size": normalized_page_size,
+            "total_rows": total_rows,
+            "total_pages": total_pages,
+            "start_row": start_row,
+            "end_row": end_row,
+            "updated_at": self._iso_from_stat(target),
+        }
 
     def delete_folder(self, user_id: int, path: str, *, force: bool = False) -> bool:
         root = self.asset_root(user_id)

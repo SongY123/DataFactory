@@ -372,6 +372,25 @@ def delete_file(request: Request, path: str = Query(...)):
     }
 
 
+@router.get("/files/preview")
+def preview_file(
+    request: Request,
+    path: str = Query(...),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(200, ge=1, le=200),
+):
+    user = get_login_user(request)
+    try:
+        payload = _asset_service.preview_file_page(int(user["id"]), path, page=page, page_size=page_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        **payload,
+    }
+
+
 @router.post("/upload")
 async def upload_file(request: Request, file: UploadFile = File(...), folder_path: str = Form("")):
     user = get_login_user(request)
