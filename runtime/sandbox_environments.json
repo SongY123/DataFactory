@@ -7,6 +7,13 @@
       "python_path": "/opt/anaconda3/bin/python3.11",
       "created_at": "2026-03-22T01:02:59.073077+00:00",
       "updated_at": "2026-03-22T01:02:59.073077+00:00"
+    },
+    {
+      "id": "env-d3934326cd",
+      "name": "DataFactory",
+      "python_path": "D:\\Anaconda\\envs\\DataFactory\\python.exe",
+      "created_at": "2026-03-23T13:38:55.175962+00:00",
+      "updated_at": "2026-03-23T13:38:55.175962+00:00"
     }
   ]
 }

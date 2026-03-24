@@ -15,7 +15,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib import request as urllib_request
 from urllib.error import URLError
 
@@ -83,6 +83,57 @@ class AgenticSynthesisService:
         self._lock = threading.RLock()
         self._running_threads: Dict[int, threading.Thread] = {}
 
+    def start_tasks(
+        self,
+        user_id: int,
+        dataset_ids: List[int],
+        prompt: str,
+        action_tags: List[str],
+        llm_api_key: str,
+        llm_base_url: str,
+        llm_model_name: str,
+        parallelism: int = 1,
+        save_path: Optional[str] = None,
+        save_path_key: Optional[str] = None,
+        sandbox_environment_id: Optional[str] = None,
+        llm_params_json: Optional[str] = None,
+    ) -> Dict:
+        normalized_dataset_ids = [int(x) for x in (dataset_ids or []) if int(x) > 0]
+        if not normalized_dataset_ids:
+            raise ValueError("dataset_ids must not be empty")
+        effective_prompt = str(prompt or "").strip() or FIXED_TASK_PROMPT
+        effective_action_tags = [str(item or "").strip() for item in (action_tags or []) if str(item or "").strip()]
+        if not effective_action_tags:
+            effective_action_tags = list(FIXED_ACTION_TAGS)
+        llm_params = self._parse_llm_params_json(llm_params_json)
+        selected_environment = self.sandbox_environment_service.resolve_python_executable(sandbox_environment_id)
+        python_executable = str(selected_environment.get("python_path") or "").strip()
+
+        started_tasks: List[Dict[str, Any]] = []
+        for dataset_id in normalized_dataset_ids:
+            payload = self._start_single_task(
+                user_id=int(user_id),
+                dataset_id=int(dataset_id),
+                prompt=effective_prompt,
+                action_tags=effective_action_tags,
+                llm_api_key=str(llm_api_key or "").strip(),
+                llm_base_url=str(llm_base_url or "").strip(),
+                llm_model_name=str(llm_model_name or "").strip(),
+                parallelism=parallelism,
+                save_path=save_path,
+                save_path_key=save_path_key,
+                llm_params=llm_params,
+                python_executable=python_executable,
+            )
+            started_tasks.append(payload)
+
+        return {
+            "tasks": started_tasks,
+            "task_ids": [int(item.get("id") or 0) for item in started_tasks],
+            "dataset_ids": normalized_dataset_ids,
+            "count": len(started_tasks),
+        }
+
     def start_task(
         self,
         user_id: int,
@@ -98,27 +149,55 @@ class AgenticSynthesisService:
         sandbox_environment_id: Optional[str] = None,
         llm_params_json: Optional[str] = None,
     ) -> Dict:
+        result = self.start_tasks(
+            user_id=user_id,
+            dataset_ids=[dataset_id],
+            prompt=prompt,
+            action_tags=action_tags,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model_name=llm_model_name,
+            parallelism=parallelism,
+            save_path=save_path,
+            save_path_key=save_path_key,
+            sandbox_environment_id=sandbox_environment_id,
+            llm_params_json=llm_params_json,
+        )
+        tasks = list(result.get("tasks") or [])
+        if not tasks:
+            raise RuntimeError("no task started")
+        return dict(tasks[0])
+
+    def _start_single_task(
+        self,
+        *,
+        user_id: int,
+        dataset_id: int,
+        prompt: str,
+        action_tags: List[str],
+        llm_api_key: str,
+        llm_base_url: str,
+        llm_model_name: str,
+        parallelism: int,
+        save_path: Optional[str],
+        save_path_key: Optional[str],
+        llm_params: Dict[str, Any],
+        python_executable: str,
+    ) -> Dict[str, Any]:
         dataset = self.dataset_dao.get_dataset_by_id(dataset_id=dataset_id, user_id=user_id)
         if dataset is None:
-            raise ValueError("dataset not found for current user")
-        effective_prompt = str(prompt or "").strip() or FIXED_TASK_PROMPT
-        effective_action_tags = [str(item or "").strip() for item in (action_tags or []) if str(item or "").strip()]
-        if not effective_action_tags:
-            effective_action_tags = list(FIXED_ACTION_TAGS)
-        llm_params = self._parse_llm_params_json(llm_params_json)
+            raise ValueError(f"dataset not found for current user: dataset_id={dataset_id}")
         dataset_root = self._resolve_path(str(dataset.file_path or ""))
         workspaces = self._collect_direct_workspaces(dataset_root)
         if not workspaces:
-            raise ValueError("dataset has no direct workspace folders")
+            raise ValueError(f"dataset has no direct workspace folders: dataset_id={dataset_id}")
         normalized_parallelism = self._normalize_parallelism(parallelism, len(workspaces))
-        selected_environment = self.sandbox_environment_service.resolve_python_executable(sandbox_environment_id)
-        python_executable = str(selected_environment.get("python_path") or "").strip()
 
         task = self.task_dao.insert_task(
             user_id=user_id,
             dataset_id=dataset_id,
-            prompt_text=effective_prompt,
-            action_tags=effective_action_tags,
+            prompt_text=prompt,
+            action_tags=action_tags,
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
             llm_model_name=llm_model_name,
@@ -144,11 +223,11 @@ class AgenticSynthesisService:
                 int(user_id),
                 int(dataset_id),
                 workspaces,
-                effective_prompt,
-                effective_action_tags,
-                str(llm_api_key or "").strip(),
-                str(llm_base_url or "").strip(),
-                str(llm_model_name or "").strip(),
+                prompt,
+                action_tags,
+                llm_api_key,
+                llm_base_url,
+                llm_model_name,
                 python_executable,
                 normalized_parallelism,
                 llm_params,
@@ -227,6 +306,22 @@ class AgenticSynthesisService:
             dataset_output_path = output_path.with_name("trajectory_dataset.jsonl")
             manifest_path = output_path.with_name("manifest.json")
             with output_path.open("w", encoding="utf-8") as writer, dataset_output_path.open("w", encoding="utf-8") as dataset_writer:
+                persist_lock = threading.Lock()
+
+                def persist_entry_now(entry: Dict[str, Any]) -> None:
+                    nonlocal generated_records, generated_samples
+                    workspace_payload = {"entries": [entry]}
+                    with persist_lock:
+                        generated_records, generated_samples = self._persist_workspace_records(
+                            user_id=user_id,
+                            dataset_id=dataset_id,
+                            workspace_payload=workspace_payload,
+                            writer=writer,
+                            dataset_writer=dataset_writer,
+                            generated_records=generated_records,
+                            generated_samples=generated_samples,
+                        )
+
                 if effective_parallelism > 1:
                     with ThreadPoolExecutor(max_workers=effective_parallelism, thread_name_prefix=f"trajectory-{task_id}") as executor:
                         futures = [
@@ -243,25 +338,17 @@ class AgenticSynthesisService:
                                 llm_model_name=llm_model_name,
                                 python_executable=python_executable,
                                 llm_params=llm_params,
+                                on_entry_persist=persist_entry_now,
                             )
                             for workspace in workspaces
                         ]
                         for future in as_completed(futures):
-                            workspace_payload = future.result()
-                            generated_records, generated_samples = self._persist_workspace_records(
-                                user_id=user_id,
-                                dataset_id=dataset_id,
-                                workspace_payload=workspace_payload,
-                                writer=writer,
-                                dataset_writer=dataset_writer,
-                                generated_records=generated_records,
-                                generated_samples=generated_samples,
-                            )
+                            future.result()
                             processed_workspaces += 1
                             self.task_dao.update_progress(task_id=task_id, processed_workspaces=processed_workspaces)
                 else:
                     for workspace in workspaces:
-                        workspace_payload = self._process_workspace_records(
+                        self._process_workspace_records(
                             task_id=task_id,
                             user_id=user_id,
                             dataset_id=dataset_id,
@@ -273,15 +360,7 @@ class AgenticSynthesisService:
                             llm_model_name=llm_model_name,
                             python_executable=python_executable,
                             llm_params=llm_params,
-                        )
-                        generated_records, generated_samples = self._persist_workspace_records(
-                            user_id=user_id,
-                            dataset_id=dataset_id,
-                            workspace_payload=workspace_payload,
-                            writer=writer,
-                            dataset_writer=dataset_writer,
-                            generated_records=generated_records,
-                            generated_samples=generated_samples,
+                            on_entry_persist=persist_entry_now,
                         )
                         processed_workspaces += 1
                         self.task_dao.update_progress(task_id=task_id, processed_workspaces=processed_workspaces)
@@ -352,6 +431,7 @@ class AgenticSynthesisService:
         llm_model_name: str,
         python_executable: str,
         llm_params: Dict[str, Any],
+        on_entry_persist: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         entries: List[Dict[str, Any]] = []
         tmp_dir = self._prepare_workspace_copy(task_id=task_id, workspace=workspace)
@@ -368,7 +448,6 @@ class AgenticSynthesisService:
                     api_key=llm_api_key,
                     base_url=llm_base_url,
                     model_name=llm_model_name,
-                    python_executable=python_executable,
                     llm_params=llm_params,
                 )
             except Exception as q_exc:
@@ -400,6 +479,7 @@ class AgenticSynthesisService:
                     api_key=llm_api_key,
                     base_url=llm_base_url,
                     model_name=llm_model_name,
+                    python_executable=python_executable,
                     llm_params=llm_params,
                 )
                 evaluation = self._evaluate_result(
@@ -445,7 +525,11 @@ class AgenticSynthesisService:
                             "source_question": question,
                         },
                     }
-                entries.append({"record": record, "dataset_record": dataset_record})
+                entry = {"record": record, "dataset_record": dataset_record}
+                if on_entry_persist is not None:
+                    on_entry_persist(entry)
+                else:
+                    entries.append(entry)
         except Exception as ws_exc:
             logger.exception("Workspace synthesis failed. task_id=%s workspace=%s", task_id, workspace.name)
             failed_record = {
@@ -467,7 +551,11 @@ class AgenticSynthesisService:
                 "error": str(ws_exc),
                 "model_output_audit": self._build_audit_text("workspace_pipeline", ws_exc),
             }
-            entries.append({"record": failed_record, "dataset_record": None})
+            failed_entry = {"record": failed_record, "dataset_record": None}
+            if on_entry_persist is not None:
+                on_entry_persist(failed_entry)
+            else:
+                entries.append(failed_entry)
         finally:
             self._cleanup_workspace_copy(tmp_dir)
 
@@ -581,12 +669,16 @@ class AgenticSynthesisService:
         save_path: Optional[str] = None,
         save_path_key: Optional[str] = None,
     ) -> Path:
-        base_root = self._resolve_selected_output_root(
-            save_path=save_path,
-            save_path_key=save_path_key,
-            task_namespace="",
-        )
-        output_dir = base_root / str(int(user_id)) / str(int(task_id))
+        local_root = self._resolve_local_output_root(save_path=save_path)
+        if local_root is not None:
+            output_dir = local_root / str(int(task_id))
+        else:
+            base_root = self._resolve_selected_output_root(
+                save_path=None,
+                save_path_key=save_path_key,
+                task_namespace="",
+            )
+            output_dir = base_root / str(int(user_id)) / str(int(task_id))
         output_dir.mkdir(parents=True, exist_ok=True)
         return (output_dir / "result.jsonl").resolve()
 
