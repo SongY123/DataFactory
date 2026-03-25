@@ -12,6 +12,7 @@ from .dataset_request import (
 from .reasoning_distillation_request import ReasoningDistillationStartRequest
 from .user_preference_request import UserPreferenceUpdateRequest
 from .user_request import UserCreateRequest, UserUpdateRequest
+from .workflow_assistant_request import WorkflowAssistantChatRequest, WorkflowAssistantMessage
 
 __all__ = [
     "LoginRequest",
@@ -31,4 +32,6 @@ __all__ = [
     "AgenticSynthesisTaskQueryRequest",
     "ReasoningDistillationStartRequest",
     "UserPreferenceUpdateRequest",
+    "WorkflowAssistantChatRequest",
+    "WorkflowAssistantMessage",
 ]

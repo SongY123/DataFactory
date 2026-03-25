@@ -46,10 +46,10 @@ model:
     enable_thinking: false  # 启用 Qwen3 的 thinking 功能
   dashscope:
     model_name: "qwen-max"
-    api_key: ""
+    api_key: "sk-68b2b9b505124a5db93109bee816a33e"
     stream: true
     enable_thinking: false
-    base_url: null
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 agent:
   models:

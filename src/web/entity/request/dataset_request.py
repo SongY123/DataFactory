@@ -151,6 +151,7 @@ class DatasetQueryRequest(BaseModel):
     format_tags: List[str] = Field(default_factory=list)
     language_tags: List[str] = Field(default_factory=list)
     size_levels: List[str] = Field(default_factory=list)
+    min_size_bytes: Optional[int] = Field(default=None, ge=0)
     statuses: List[str] = Field(default_factory=list)
 
     @field_validator("name_keyword", mode="before")

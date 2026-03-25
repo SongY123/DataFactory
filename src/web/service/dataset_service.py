@@ -280,6 +280,15 @@ class DatasetService:
         if size_levels and self._size_bucket(payload.get("size")) not in size_levels:
             return False
 
+        min_size_bytes = query.get("min_size_bytes")
+        if min_size_bytes is not None:
+            try:
+                normalized_min_size = int(min_size_bytes)
+            except (TypeError, ValueError):
+                normalized_min_size = None
+            if normalized_min_size is not None and int(payload.get("size") or 0) < max(0, normalized_min_size):
+                return False
+
         status_filters = {self._normalize_dataset_status(item) for item in self._normalize_tag_list(query.get("statuses"))}
         if status_filters and self._normalize_dataset_status(payload.get("status")) not in status_filters:
             return False

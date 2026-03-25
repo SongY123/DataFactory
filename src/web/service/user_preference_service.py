@@ -11,6 +11,7 @@ ALLOWED_PREFERENCE_KEYS = {
     "trajectory_synthesis",
     "reasoning_synthesis",
     "interactive_testing",
+    "workflow_agent_chat",
 }
 
 _PREFERENCE_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")

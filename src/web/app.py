@@ -40,6 +40,7 @@ from web.api import (
     sandbox_environment_router,
     user_preference_router,
     user_router,
+    workflow_assistant_router,
 )
 
 
@@ -96,6 +97,7 @@ app.include_router(agentic_synthesis_router, prefix="/api")
 app.include_router(reasoning_distillation_router, prefix="/api")
 app.include_router(sandbox_environment_router, prefix="/api")
 app.include_router(user_preference_router, prefix="/api")
+app.include_router(workflow_assistant_router, prefix="/api")
 app.mount('/api/generated', StaticFiles(directory=str(GENERATED_OUTPUT_DIR)), name='generated-output')
 
 
