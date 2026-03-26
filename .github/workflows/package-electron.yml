@@ -1,0 +1,51 @@
+name: Package Electron Desktop
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  package-desktop:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout backend repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Package Electron app
+        env:
+          DATAFACTORY_FRONTEND_DIR: ${{ github.workspace }}/../DataFactory-Frontend
+          DATAFACTORY_FRONTEND_REPO: https://github.com/${{ github.repository_owner }}/DataFactory-Frontend.git
+          DATAFACTORY_FRONTEND_UPDATE: "0"
+        run: bash scripts/package_desktop_app.sh
+
+      - name: Prepare artifact directory
+        run: |
+          rm -rf desktop_artifacts
+          mkdir -p desktop_artifacts
+          cp -R ../DataFactory-Frontend/dist_electron/. desktop_artifacts/
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: datafactory-desktop-mac
+          path: desktop_artifacts/**
+          if-no-files-found: error

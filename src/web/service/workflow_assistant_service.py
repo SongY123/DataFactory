@@ -15,6 +15,22 @@ _GLOBAL_SYSTEM_PROMPT = (
     "If the user's message is not written in English, infer the intent internally and still reply in English. "
     "Keep dataset names, field names, code, tags, placeholders, and literal UI labels unchanged when they are part of the answer."
 )
+_TRAJECTORY_PROMPT_ENGINEER_GUIDE = (
+    "You are a prompt engineer. Based on the task requirements and the user's request, generate one reusable prompt for a large language model.\n\n"
+    "The user request may ask you to analyze the requirements, identify the key actions and constraints, and write the final reusable prompt.\n\n"
+    "Your job is to produce a prompt that instructs the target model to:\n"
+    "1) read provided data file content,\n"
+    "2) create exactly one one-sentence question,\n"
+    "3) produce exactly one grounded interaction trajectory using structured Action Tags.\n\n"
+    "The prompt must:\n"
+    "- assign a clear role,\n"
+    "- include a numbered Task requirements section,\n"
+    "- define a strict output format,\n"
+    "- define explicit tag-writing rules,\n"
+    "- enforce grounding in the provided file content,\n"
+    "- be directly reusable.\n\n"
+    "Output only the final prompt text. Do not add explanations or markdown."
+)
 
 _PAGE_PROMPTS = {
     "dataset_management": (
@@ -811,11 +827,19 @@ class WorkflowAssistantService:
             "role": "system",
             "content": (
                 "You are improving prompts for DataAgentFactory Agentic Trajectory Synthesis. "
-                "Answer in English. Use the current synthesis prompt, the default template, and the user's task intent as references. "
-                "Recommend an action sequence and an updated synthesis prompt that stays compatible with the existing workflow. "
+                "Answer in English. Use the following prompt-engineering brief as the primary rule set for generating the recommended synthesis prompt:\n\n"
+                f"{_TRAJECTORY_PROMPT_ENGINEER_GUIDE}\n\n"
+                "Use the current synthesis prompt, the default template, and the user's task intent as references. "
+                "Keep the recommended prompt structurally close to the default synthesis template unless the user explicitly requests a different format. "
+                "The recommended prompt should normally include a clear role, a numbered Task requirements section, a Seed question placeholder with {question}, "
+                "a strict output format section, and explicit tag-writing rules. "
+                "The trajectory must use the canonical Action Tags in order whenever possible. "
+                "If the user asks to analyze the task, identify the required action tags and output format, and write a reusable prompt, "
+                "produce a reusable synthesis prompt close to the existing default trajectory template. "
+                "Also summarize the key changes in one short English answer. "
                 "Return valid JSON only with this schema: "
                 '{"answer":"string","prompt_recommendation":{"target":"synthesis","prompt":"string","changes":["string"],"action_sequence":["Analyze","Understand","Code","Execute","Answer"]}}. '
-                "The recommended prompt must be directly usable in the UI textarea. "
+                "The prompt_recommendation.prompt field must contain only the final reusable prompt text, with no markdown fences or extra explanation. "
                 f"Prefer this canonical action vocabulary when possible: {json.dumps(action_tags, ensure_ascii=False)}."
             ),
         }

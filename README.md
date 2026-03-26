@@ -1,6 +1,6 @@
 # DataFactory
 
-This project is a trimmed migration of the main `SpatialText2SQL` web architecture, preserving the layered structure: `api/service/dao/entity/resources`.
+This project preserves a layered web architecture with `api/service/dao/entity/resources`.
 
 Currently retained:
 - Local SQLite initialization (SQL migrations run automatically at startup)
@@ -8,7 +8,6 @@ Currently retained:
 - User management APIs (`/api/users`)
 
 Removed:
-- Map/spatial-related features
 - Multi-agent features
 - Other business features such as chat, admin, and database probing/execution
 
