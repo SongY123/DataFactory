@@ -28,7 +28,7 @@ In `/src/web/resources/config.yaml`, set:
 
 ```yaml
 auth:
-  auto_login_as_admin: true
+  auto_login_as_user: true
 ```
 
 When enabled, guarded APIs can be called without login. The backend will automatically authenticate using `admin/admin`.
